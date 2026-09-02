@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="com.example.sumire.permission.CLIPBOARD_SYNC" />
+    <uses-permission android:name="com.example.sumire.lite.permission.CLIPBOARD_SYNC" />
+    <uses-permission android:name="com.example.sumire.lite.fdroid.permission.CLIPBOARD_SYNC" />
+
+    <queries>
+        <package android:name="com.example.sumire" />
+        <package android:name="com.example.sumire.lite" />
+        <package android:name="com.example.sumire.lite.fdroid" />
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@drawable/ic_launcher"
+        android:label="Sumire Sync"
+        android:roundIcon="@drawable/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        android:usesCleartextTraffic="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <receiver
+            android:name=".sync.ClipboardChangedReceiver"
+            android:exported="true"
+            android:permission="com.example.sumire.permission.CLIPBOARD_SYNC">
+            <intent-filter>
+                <action android:name="com.example.sumire.action.CLIPBOARD_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".sync.LiteClipboardChangedReceiver"
+            android:exported="true"
+            android:permission="com.example.sumire.lite.permission.CLIPBOARD_SYNC">
+            <intent-filter>
+                <action android:name="com.example.sumire.lite.action.CLIPBOARD_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".sync.FdroidClipboardChangedReceiver"
+            android:exported="true"
+            android:permission="com.example.sumire.lite.fdroid.permission.CLIPBOARD_SYNC">
+            <intent-filter>
+                <action android:name="com.example.sumire.lite.fdroid.action.CLIPBOARD_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".sync.BootReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".sync.CatchUpJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+        <service
+            android:name=".upload.UploadJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+    </application>
+</manifest>

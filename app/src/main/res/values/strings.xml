@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="foreground_inference">コピー時のforegroundアプリを推定する（任意）</string>
+    <string name="sync_now">今すぐcatch-up</string>
+</resources>
