@@ -16,9 +16,12 @@ import android.text.TextUtils;
 import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Spinner;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -34,10 +37,25 @@ import java.util.Date;
 
 public final class MainActivity extends Activity {
     private static final long STATUS_REFRESH_MILLIS = 1_500;
+    private static final long[] FLAG_DURATIONS = {
+            15 * 60 * 1000L,
+            30 * 60 * 1000L,
+            60 * 60 * 1000L,
+            3 * 60 * 60 * 1000L,
+            6 * 60 * 60 * 1000L,
+            12 * 60 * 60 * 1000L
+    };
+    private static final String[] FLAG_DURATION_LABELS = {
+            "15分", "30分", "1時間", "3時間", "6時間", "12時間"
+    };
     private EditText url;
     private EditText user;
     private EditText password;
     private CheckBox foreground;
+    private Switch flagging;
+    private Spinner flagDuration;
+    private TextView flagRemaining;
+    private boolean updatingFlagUi;
     private TextView source;
     private TextView status;
     private Handler statusHandler;
@@ -97,6 +115,50 @@ public final class MainActivity extends Activity {
         usageAccess.setOnClickListener(v -> showUsageAccessHelp());
         root.addView(usageAccess);
 
+        flagging = new Switch(this);
+        flagging.setText(R.string.flag_toggle);
+        flagging.setPadding(0, dp(12), 0, 0);
+        flagging.setOnCheckedChangeListener((button, checked) -> {
+            if (updatingFlagUi) return;
+            new AppSettings(this).setFlaggingEnabled(checked);
+            refreshFlagUi();
+        });
+        root.addView(flagging);
+
+        TextView flagDescription = text(getString(R.string.flag_description), 13);
+        flagDescription.setPadding(0, dp(2), 0, dp(4));
+        root.addView(flagDescription);
+
+        LinearLayout durationRow = new LinearLayout(this);
+        durationRow.setOrientation(LinearLayout.HORIZONTAL);
+        durationRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView durationLabel = text(getString(R.string.flag_auto_off), 16);
+        durationRow.addView(durationLabel, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        flagDuration = new Spinner(this);
+        flagDuration.setAdapter(new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_dropdown_item, FLAG_DURATION_LABELS));
+        flagDuration.setSelection(durationPosition(new AppSettings(this).flagDurationMillis()));
+        flagDuration.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view,
+                                                  int position, long id) {
+                if (updatingFlagUi) return;
+                AppSettings settings = new AppSettings(MainActivity.this);
+                if (settings.flagDurationMillis() != FLAG_DURATIONS[position]) {
+                    settings.setFlagDurationMillis(FLAG_DURATIONS[position]);
+                    refreshFlagUi();
+                }
+            }
+
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
+        durationRow.addView(flagDuration);
+        root.addView(durationRow);
+
+        flagRemaining = text("", 13);
+        flagRemaining.setPadding(0, 0, 0, dp(8));
+        root.addView(flagRemaining);
+
         Button save = new Button(this);
         save.setText("設定を保存して同期");
         save.setOnClickListener(v -> saveAndSync());
@@ -126,6 +188,7 @@ public final class MainActivity extends Activity {
         url.setText(settings.webDavUrl());
         user.setText(settings.webDavUser());
         foreground.setChecked(settings.foregroundInferenceEnabled());
+        refreshFlagUi();
         try {
             password.setText(new SecretStore(this).getPassword());
         } catch (Exception error) {
@@ -161,6 +224,7 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshStatus() {
+        refreshFlagUi();
         SyncStateStore.State state;
         try (SyncStateStore states = new SyncStateStore(this)) {
             state = states.read();
@@ -188,6 +252,41 @@ public final class MainActivity extends Activity {
                     .append(SumireContract.statusUri(connectedAuthority));
         }
         status.setText(value.toString());
+    }
+
+    private void refreshFlagUi() {
+        if (flagging == null || flagDuration == null || flagRemaining == null) return;
+        AppSettings settings = new AppSettings(this);
+        boolean enabled = settings.flaggingEnabled();
+        updatingFlagUi = true;
+        try {
+            flagging.setChecked(enabled);
+            flagDuration.setSelection(durationPosition(settings.flagDurationMillis()));
+        } finally {
+            updatingFlagUi = false;
+        }
+        if (enabled) {
+            long remaining = Math.max(0, settings.flagExpiresAt() - System.currentTimeMillis());
+            flagRemaining.setText("あと" + remainingLabel(remaining) + "でOFF");
+            flagRemaining.setVisibility(View.VISIBLE);
+        } else {
+            flagRemaining.setVisibility(View.GONE);
+        }
+    }
+
+    private static int durationPosition(long durationMillis) {
+        for (int i = 0; i < FLAG_DURATIONS.length; i++) {
+            if (FLAG_DURATIONS[i] == durationMillis) return i;
+        }
+        return 1;
+    }
+
+    private static String remainingLabel(long remainingMillis) {
+        long minutes = Math.max(1, (remainingMillis + 60_000 - 1) / 60_000);
+        if (minutes < 60) return minutes + "分";
+        long hours = minutes / 60;
+        long rest = minutes % 60;
+        return rest == 0 ? hours + "時間" : hours + "時間" + rest + "分";
     }
 
     private String sourceLabel(String connectedAuthority) {

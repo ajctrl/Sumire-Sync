@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="foreground_inference">コピー時のforegroundアプリを推定する（任意）</string>
+    <string name="flag_toggle">フラグ</string>
+    <string name="flag_description">ON中に同期した項目へフラグを保存します</string>
+    <string name="flag_auto_off">自動OFF</string>
     <string name="sync_now">今すぐcatch-up</string>
 </resources>

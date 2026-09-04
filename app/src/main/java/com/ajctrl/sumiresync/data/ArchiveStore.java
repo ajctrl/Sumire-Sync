@@ -20,7 +20,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class ArchiveStore {
-    private static final int ARCHIVE_VERSION = 2;
+    private static final int ARCHIVE_VERSION = 3;
     private static final int CONTENT_CHUNK_BYTES = 64 * 1024;
     private static final Map<String, Object> LOCKS = new ConcurrentHashMap<>();
     private final Context context;
@@ -37,7 +37,8 @@ public final class ArchiveStore {
     }
 
     public void save(SyncStatus status, ClipboardItem item, InputStream content,
-                     String foregroundPackage, String foregroundAppName) throws IOException {
+                     String foregroundPackage, String foregroundAppName,
+                     boolean flagged) throws IOException {
         String fileName = fileNameFor(item.createdAt);
         synchronized (lock(fileName)) {
             SQLiteDatabase db = open(fileName);
@@ -57,6 +58,7 @@ public final class ArchiveStore {
                     values.put("content_size", 0);
                     values.put("foreground_package", foregroundPackage);
                     values.put("foreground_app_name", foregroundAppName);
+                    values.put("is_flagged", flagged ? 1 : 0);
                     values.put("archived_at", System.currentTimeMillis());
                     long inserted = db.insertWithOnConflict("clipboard_items", null, values,
                             SQLiteDatabase.CONFLICT_IGNORE);
@@ -122,6 +124,8 @@ public final class ArchiveStore {
                 createArchiveSchema(db);
             } else if (version == 1) {
                 migrateArchiveFromV1(db);
+            } else if (version == 2) {
+                migrateArchiveFromV2(db);
             } else if (version != ARCHIVE_VERSION) {
                 throw new SQLiteException("Unsupported archive database version: " + version);
             }
@@ -149,7 +153,8 @@ public final class ArchiveStore {
                 "source_id INTEGER NOT NULL, item_type TEXT NOT NULL, created_at INTEGER NOT NULL, " +
                 "is_pinned INTEGER NOT NULL, preview TEXT, content BLOB, " +
                 "content_storage TEXT NOT NULL, content_size INTEGER NOT NULL, " +
-                "foreground_package TEXT, foreground_app_name TEXT, archived_at INTEGER NOT NULL, " +
+                "foreground_package TEXT, foreground_app_name TEXT, " +
+                "is_flagged INTEGER NOT NULL DEFAULT 0, archived_at INTEGER NOT NULL, " +
                 "PRIMARY KEY(database_instance_id,clipboard_generation,source_id))");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_clipboard_created_at ON clipboard_items(created_at)");
         db.execSQL("CREATE TABLE IF NOT EXISTS clipboard_content_chunks (" +
@@ -167,11 +172,23 @@ public final class ArchiveStore {
             db.execSQL("INSERT INTO clipboard_items(" +
                     "database_instance_id,clipboard_generation,source_id,item_type,created_at," +
                     "is_pinned,preview,content,content_storage,content_size,foreground_package," +
-                    "foreground_app_name,archived_at) SELECT database_instance_id," +
+                    "foreground_app_name,is_flagged,archived_at) SELECT database_instance_id," +
                     "clipboard_generation,source_id,item_type,created_at,is_pinned,preview,content," +
-                    "'INLINE',length(content),foreground_package,foreground_app_name,archived_at " +
+                    "'INLINE',length(content),foreground_package,foreground_app_name,0,archived_at " +
                     "FROM clipboard_items_v1");
             db.execSQL("DROP TABLE clipboard_items_v1");
+            db.setVersion(ARCHIVE_VERSION);
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    private static void migrateArchiveFromV2(SQLiteDatabase db) {
+        db.beginTransaction();
+        try {
+            db.execSQL("ALTER TABLE clipboard_items ADD COLUMN " +
+                    "is_flagged INTEGER NOT NULL DEFAULT 0");
             db.setVersion(ARCHIVE_VERSION);
             db.setTransactionSuccessful();
         } finally {

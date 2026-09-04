@@ -79,7 +79,8 @@ public final class SyncEngine implements AutoCloseable {
                         ForegroundEstimator.Candidate candidate = candidates.get(item.id);
                         archives.save(remote, item, content,
                                 candidate == null ? null : candidate.packageName,
-                                candidate == null ? null : candidate.appName);
+                                candidate == null ? null : candidate.appName,
+                                settings.flaggingEnabled());
                     } catch (FileNotFoundException missing) {
                         states.recordGap(remote.databaseInstanceId, remote.clipboardGeneration,
                                 item.id, "content no longer exists");

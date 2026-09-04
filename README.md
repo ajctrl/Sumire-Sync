@@ -60,6 +60,6 @@ WebDAV未設定でもSumireから月次SQLiteへのローカル保存は継続�
 
 ## 月次SQLite schema
 
-主要テーブルは`clipboard_items`です。元データの識別情報、type、作成時刻、preview、本文の格納方式・サイズ、任意のforeground package/app labelを保持します。テキスト本文は`clipboard_content_chunks`へ64 KiB単位で保存され、同じ元データキーの`chunk_index`昇順で復元できます。旧schemaから移行した本文だけは`content_storage = INLINE`として`clipboard_items.content`に残ります。
+主要テーブルは`clipboard_items`です。元データの識別情報、type、作成時刻、preview、本文の格納方式・サイズ、任意のforeground package/app labelに加え、フラグがONの間に同期した項目を示す`is_flagged`を保持します。フラグのトグルは設定時間後に自動でOFFになりますが、保存済みの`is_flagged`は変更しません。テキスト本文は`clipboard_content_chunks`へ64 KiB単位で保存され、同じ元データキーの`chunk_index`昇順で復元できます。旧schemaから移行した本文だけは`content_storage = INLINE`として`clipboard_items.content`に残ります。
 
 同期制御情報と欠損ログは別の内部DB `sync-state.sqlite` に保存され、アップロード対象には含まれません。`IMAGE`は未対応として欠損ログへ記録し、本文を開かずに後続IDへ進みます。未知の`itemType`はデータ損失を避けるため同期を停止します。
