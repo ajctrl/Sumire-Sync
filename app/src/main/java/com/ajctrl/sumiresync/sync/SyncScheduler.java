@@ -7,6 +7,7 @@ import android.content.Context;
 import android.os.Build;
 
 import com.ajctrl.sumiresync.data.SyncStateStore;
+import com.ajctrl.sumiresync.settings.AppSettings;
 import com.ajctrl.sumiresync.upload.UploadJobService;
 
 public final class SyncScheduler {
@@ -99,7 +100,8 @@ public final class SyncScheduler {
 
     public static void scheduleUpload(Context context) {
         Context app = context.getApplicationContext();
-        try {
+        try (SyncStateStore states = new SyncStateStore(app)) {
+            states.prepareUploadDestination(new AppSettings(app).uploadGeneration());
             if (!scheduleUploadSlot(app)) recordUploadScheduleError(app, null);
         } catch (RuntimeException error) {
             recordUploadScheduleError(app, error);
@@ -126,6 +128,9 @@ public final class SyncScheduler {
 
     public static void scheduleUploadIfDirty(Context context) {
         try (SyncStateStore states = new SyncStateStore(context)) {
+            // Recover even if the process died after settings were saved but before a job
+            // was scheduled. The destination generation is persisted with the settings.
+            states.prepareUploadDestination(new AppSettings(context).uploadGeneration());
             if (!states.dirtyArchives().isEmpty()) scheduleUpload(context);
         } catch (RuntimeException ignored) {
             // dirty_archives is durable; a later catch-up or boot will try again.

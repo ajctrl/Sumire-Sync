@@ -17,22 +17,25 @@ import javax.crypto.spec.GCMParameterSpec;
 public final class SecretStore {
     private static final String KEY_ALIAS = "sumire-sync-webdav";
     private static final String PREFS = "secrets";
-    private static final String PASSWORD = "webdav_password";
+    static final String PASSWORD = "webdav_password";
     private final Context context;
 
     public SecretStore(Context context) { this.context = context.getApplicationContext(); }
 
-    public void setPassword(String password) throws Exception {
+    public String encryptPassword(String password) throws Exception {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.ENCRYPT_MODE, key());
         byte[] encrypted = cipher.doFinal(password.getBytes(StandardCharsets.UTF_8));
-        String value = Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP) + ":" +
+        return Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP) + ":" +
                 Base64.encodeToString(encrypted, Base64.NO_WRAP);
-        prefs().edit().putString(PASSWORD, value).apply();
     }
 
     public String getPassword() throws Exception {
-        String value = prefs().getString(PASSWORD, null);
+        // New credentials are committed atomically with their destination. Keep reading
+        // the legacy preference until the user next saves settings after upgrading.
+        String value = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .getString(PASSWORD, null);
+        if (value == null) value = prefs().getString(PASSWORD, null);
         if (value == null) return "";
         String[] parts = value.split(":", 2);
         if (parts.length != 2) throw new IllegalStateException("Invalid encrypted credential");

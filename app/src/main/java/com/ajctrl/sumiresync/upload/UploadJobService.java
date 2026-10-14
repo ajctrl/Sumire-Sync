@@ -7,7 +7,6 @@ import android.util.Log;
 import com.ajctrl.sumiresync.data.ArchiveStore;
 import com.ajctrl.sumiresync.data.SyncStateStore;
 import com.ajctrl.sumiresync.settings.AppSettings;
-import com.ajctrl.sumiresync.settings.SecretStore;
 
 import java.io.File;
 import java.util.Collections;
@@ -60,26 +59,26 @@ public final class UploadJobService extends JobService {
     private boolean uploadDirtyArchives(JobParameters params) throws Exception {
         try (SyncStateStore states = new SyncStateStore(this)) {
             AppSettings settings = new AppSettings(this);
-            String url = settings.webDavUrl();
-            if (url.isEmpty()) return true;
-            String password = new SecretStore(this).getPassword();
+            AppSettings.UploadSettings destination = settings.uploadSettings();
+            if (!states.prepareUploadDestination(destination.generation)) return false;
+            if (destination.url.isEmpty()) return true;
             ArchiveStore archives = new ArchiveStore(this, states);
             for (int pass = 0; pass < MAX_DIRTY_PASSES; pass++) {
-                if (isStopped(params)) return false;
+                if (isStopped(params) || settings.uploadGeneration() != destination.generation) return false;
                 List<SyncStateStore.DirtyArchive> dirty = states.dirtyArchives();
                 if (dirty.isEmpty()) {
                     states.clearUploadError();
                     return true;
                 }
                 for (SyncStateStore.DirtyArchive entry : dirty) {
-                    if (isStopped(params)) return false;
+                    if (isStopped(params) || settings.uploadGeneration() != destination.generation) return false;
                     File snapshot = archives.snapshot(entry.fileName);
                     try {
-                        new WebDavClient().put(url, settings.webDavUser(), password, snapshot);
+                        new WebDavClient().put(destination.url, destination.user, destination.password, snapshot);
                         // onStopJob releases this job's lifecycle guarantee. Never acknowledge
                         // an upload from work that Android has already stopped.
-                        if (isStopped(params)) return false;
-                        states.markUploaded(entry.fileName, entry.revision);
+                        if (isStopped(params) || settings.uploadGeneration() != destination.generation) return false;
+                        states.markUploaded(entry.fileName, entry.revision, destination.generation);
                     } finally {
                         if (snapshot.exists() && !snapshot.delete()) snapshot.deleteOnExit();
                     }

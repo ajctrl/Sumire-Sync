@@ -212,8 +212,8 @@ public final class MainActivity extends Activity {
             }
         }
         try {
-            new AppSettings(this).save(value, username, foreground.isChecked());
-            new SecretStore(this).setPassword(password.getText().toString());
+            new AppSettings(this).save(value, username, foreground.isChecked(),
+                    password.getText().toString());
             url.setText(value);
             SyncScheduler.requestManualSync(this);
             Toast.makeText(this, "設定を保存して同期を開始しました", Toast.LENGTH_SHORT).show();

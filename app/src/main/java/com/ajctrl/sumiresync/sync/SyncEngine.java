@@ -53,7 +53,6 @@ public final class SyncEngine implements AutoCloseable {
                 if (confirmed.currentSequence < local.lastId) {
                     throw new IllegalStateException("Sumire sequence moved backwards during sync");
                 }
-                remote = confirmed;
                 Map<Long, ForegroundEstimator.Candidate> candidates = inferForeground(items);
                 long expected = local.lastId + 1;
                 int saved = 0;
@@ -80,8 +79,9 @@ public final class SyncEngine implements AutoCloseable {
                         archives.save(remote, item, content,
                                 candidate == null ? null : candidate.packageName,
                                 candidate == null ? null : candidate.appName,
-                                settings.flaggingEnabled());
+                                settings.flaggingEnabled(), () -> validateSource(authority, remote));
                     } catch (FileNotFoundException missing) {
+                        validateSource(authority, remote);
                         states.recordGap(remote.databaseInstanceId, remote.clipboardGeneration,
                                 item.id, "content no longer exists");
                         states.advance(item.id);
@@ -156,6 +156,16 @@ public final class SyncEngine implements AutoCloseable {
                     cursor.getString(required(cursor, "databaseInstanceId")),
                     cursor.getInt(required(cursor, "clipboardGeneration")),
                     cursor.getLong(required(cursor, "currentSequence")));
+        }
+    }
+
+    private void validateSource(String authority, SyncStatus expected) {
+        SyncStatus actual = readStatus(authority);
+        if (!expected.databaseInstanceId.equals(actual.databaseInstanceId)
+                || expected.clipboardGeneration != actual.clipboardGeneration
+                || expected.apiVersion != actual.apiVersion
+                || actual.currentSequence < expected.currentSequence) {
+            throw new IllegalStateException("Sumire data source changed during content read; retrying safely");
         }
     }
 

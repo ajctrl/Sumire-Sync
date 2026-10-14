@@ -56,6 +56,8 @@ Broadcast actionは`${packageId}.action.CLIPBOARD_CHANGED`、permissionは`${pac
 
 アプリ画面で、NextcloudサーバーのHTTPS URL（`https://url.com:port` まで）、ユーザー名、アプリパスワードを入力します。WebDAVのパス `/remote.php/dav/files/{ユーザー名}/Sumire/` はアプリが自動的に追加します。パスワードはAndroid KeystoreのAES-GCM鍵で暗号化して保存します。書き込み中のDB本体ではなく、一時スナップショットだけをアップロードします。
 
+`Sumire`フォルダーがない場合はアップロード前に作成します。サーバーURLまたはユーザー名を変更すると、保存済みの全月次アーカイブを新しい接続先へ再送します。変更前の接続先への送信完了は、新しい接続先の送信済み状態には反映しません。
+
 WebDAV未設定でもSumireから月次SQLiteへのローカル保存は継続します。設定後、未アップロードのrevisionが順次送信されます。
 
 ## 月次SQLite schema

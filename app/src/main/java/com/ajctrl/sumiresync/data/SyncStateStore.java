@@ -11,7 +11,7 @@ import java.util.List;
 
 public final class SyncStateStore extends SQLiteOpenHelper {
     private static final String DB_NAME = "sync-state.sqlite";
-    private static final int DB_VERSION = 3;
+    private static final int DB_VERSION = 4;
 
     public SyncStateStore(Context context) {
         super(context.getApplicationContext(), DB_NAME, null, DB_VERSION);
@@ -22,7 +22,8 @@ public final class SyncStateStore extends SQLiteOpenHelper {
                 "api_version INTEGER, database_instance_id TEXT, clipboard_generation INTEGER, " +
                 "last_id INTEGER NOT NULL DEFAULT 0, last_error TEXT, last_sync_at INTEGER, " +
                 "request_revision INTEGER NOT NULL DEFAULT 0, " +
-                "handled_request_revision INTEGER NOT NULL DEFAULT 0)");
+                "handled_request_revision INTEGER NOT NULL DEFAULT 0, " +
+                "upload_generation INTEGER NOT NULL DEFAULT 0)");
         db.execSQL("INSERT INTO sync_state(singleton,last_id) VALUES(1,0)");
         db.execSQL("CREATE TABLE gaps (database_instance_id TEXT NOT NULL, generation INTEGER NOT NULL, " +
                 "source_id INTEGER NOT NULL, end_source_id INTEGER NOT NULL, " +
@@ -40,6 +41,9 @@ public final class SyncStateStore extends SQLiteOpenHelper {
         if (oldVersion < 3) {
             db.execSQL("ALTER TABLE sync_state ADD COLUMN request_revision INTEGER NOT NULL DEFAULT 0");
             db.execSQL("ALTER TABLE sync_state ADD COLUMN handled_request_revision INTEGER NOT NULL DEFAULT 0");
+        }
+        if (oldVersion < 4) {
+            db.execSQL("ALTER TABLE sync_state ADD COLUMN upload_generation INTEGER NOT NULL DEFAULT 0");
         }
     }
 
@@ -185,10 +189,35 @@ public final class SyncStateStore extends SQLiteOpenHelper {
                         + "OR last_error LIKE 'Upload:%' OR last_error LIKE 'Upload job%')");
     }
 
-    public synchronized void markUploaded(String fileName, long revision) {
+    public synchronized boolean prepareUploadDestination(long generation) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long current;
+            try (Cursor cursor = db.rawQuery(
+                    "SELECT upload_generation FROM sync_state WHERE singleton=1", null)) {
+                if (!cursor.moveToFirst()) throw new IllegalStateException("sync state is missing");
+                current = cursor.getLong(0);
+            }
+            // An older worker must not switch the upload state back to its destination.
+            if (generation < current) return false;
+            if (generation > current) {
+                db.execSQL("UPDATE dirty_archives SET uploaded_revision=0");
+                db.execSQL("UPDATE sync_state SET upload_generation=? WHERE singleton=1",
+                        new Object[]{generation});
+            }
+            db.setTransactionSuccessful();
+            return true;
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    public synchronized void markUploaded(String fileName, long revision, long generation) {
         getWritableDatabase().execSQL(
-                "UPDATE dirty_archives SET uploaded_revision=? WHERE file_name=? AND revision=?",
-                new Object[]{revision, fileName, revision});
+                "UPDATE dirty_archives SET uploaded_revision=? WHERE file_name=? AND revision=? " +
+                        "AND EXISTS (SELECT 1 FROM sync_state WHERE singleton=1 AND upload_generation=?)",
+                new Object[]{revision, fileName, revision, generation});
     }
 
     private static Integer nullableInt(Cursor c, String column) {

@@ -38,7 +38,7 @@ public final class ArchiveStore {
 
     public void save(SyncStatus status, ClipboardItem item, InputStream content,
                      String foregroundPackage, String foregroundAppName,
-                     boolean flagged) throws IOException {
+                     boolean flagged, Runnable validateSource) throws IOException {
         String fileName = fileNameFor(item.createdAt);
         synchronized (lock(fileName)) {
             SQLiteDatabase db = open(fileName);
@@ -75,6 +75,9 @@ public final class ArchiveStore {
                                 identityArgs(status, item.id));
                         if (updated != 1) throw new SQLiteException("Cannot finalize clipboard content");
                     }
+                    // Content URIs contain only an ID, which can be reused after a reset.
+                    // Validate after consuming the stream, while rollback is still possible.
+                    validateSource.run();
                     db.setTransactionSuccessful();
                 } finally {
                     db.endTransaction();

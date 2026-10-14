@@ -1,78 +1,80 @@
 package com.ajctrl.sumiresync.upload;
 
-import android.util.Base64;
-
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.ConnectException;
-import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.SSLException;
 
+import okhttp3.Credentials;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+
 public final class WebDavClient {
+    private static final OkHttpClient CLIENT = new OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build();
+    private final OkHttpClient client;
+
+    public WebDavClient() { this(CLIENT); }
+
+    WebDavClient(OkHttpClient client) { this.client = client; }
+
     public void put(String serverUrl, String username, String password, File file) throws IOException {
         String normalizedUsername = username.trim();
         URL target = NextcloudUrl.archiveUrl(serverUrl, normalizedUsername, file.getName());
-        HttpURLConnection connection = (HttpURLConnection) target.openConnection();
-        connection.setRequestMethod("PUT");
-        connection.setConnectTimeout(20_000);
-        connection.setReadTimeout(60_000);
-        connection.setDoOutput(true);
-        connection.setFixedLengthStreamingMode(file.length());
-        connection.setRequestProperty("Content-Type", "application/vnd.sqlite3");
-        if (!normalizedUsername.isEmpty() || !password.isEmpty()) {
-            String auth = Base64.encodeToString((normalizedUsername + ":" + password)
-                    .getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
-            connection.setRequestProperty("Authorization", "Basic " + auth);
-        }
-        try {
-            try {
-                try (BufferedInputStream input = new BufferedInputStream(new FileInputStream(file));
-                     BufferedOutputStream output = new BufferedOutputStream(connection.getOutputStream())) {
-                    byte[] buffer = new byte[64 * 1024];
-                    int count;
-                    while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
-                }
-                int status = connection.getResponseCode();
-                if (status < 200 || status >= 300) {
-                    throw httpError(connection, target, status);
-                }
-            } catch (HttpStatusException error) {
-                throw error;
-            } catch (IOException error) {
-                throw connectionError(target, error);
+        URL collection = NextcloudUrl.archiveUrl(serverUrl, normalizedUsername, "");
+        String authorization = Credentials.basic(normalizedUsername, password, StandardCharsets.UTF_8);
+        // HttpURLConnection rejects WebDAV extension methods such as MKCOL on Android.
+        Request createCollection = new Request.Builder().url(collection)
+                .header("Authorization", authorization)
+                .method("MKCOL", RequestBody.create(null, new byte[0])).build();
+        execute(createCollection, true);
+        Request upload = new Request.Builder().url(target)
+                .header("Authorization", authorization)
+                .put(RequestBody.create(MediaType.get("application/vnd.sqlite3"), file)).build();
+        execute(upload, false);
+    }
+
+    private void execute(Request request, boolean creatingCollection) throws IOException {
+        URL target = request.url().url();
+        try (Response response = client.newCall(request).execute()) {
+            // RFC 4918: MKCOL returns 405 when the collection already exists.
+            if (!response.isSuccessful() && !(creatingCollection && response.code() == 405)) {
+                throw httpError(response, target);
             }
-        } finally {
-            connection.disconnect();
+        } catch (HttpStatusException error) {
+            throw error;
+        } catch (IOException error) {
+            throw connectionError(target, error);
         }
     }
 
-    private static HttpStatusException httpError(HttpURLConnection connection, URL target,
-                                                 int status) {
-        StringBuilder message = new StringBuilder("NextcloudがHTTP ").append(status);
-        try {
-            String reason = connection.getResponseMessage();
-            if (reason != null && !reason.trim().isEmpty()) message.append(' ').append(reason);
-        } catch (IOException ignored) {
-            // The numeric status is sufficient when the reason phrase is unavailable.
-        }
+    private static HttpStatusException httpError(Response response, URL target) {
+        StringBuilder message = new StringBuilder("NextcloudがHTTP ").append(response.code());
+        if (!response.message().trim().isEmpty()) message.append(' ').append(response.message());
         message.append(" を返しました; URL=").append(target);
-        String response = errorResponse(connection);
-        if (!response.isEmpty()) message.append("; 応答=").append(response);
+        String body = errorResponse(response);
+        if (!body.isEmpty()) message.append("; 応答=").append(body);
         return new HttpStatusException(message.toString());
     }
 
-    private static String errorResponse(HttpURLConnection connection) {
-        InputStream stream = connection.getErrorStream();
+    private static String errorResponse(Response response) {
+        InputStream stream = response.body() == null ? null : response.body().byteStream();
         if (stream == null) return "";
         try (InputStream input = stream; ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[512];
