@@ -2,6 +2,23 @@
 
 Sumireのクリップボード履歴を、月次SQLiteアーカイブとしてWebDAV/Nextcloudへ片方向同期するAndroidアプリです。Sumire本体とはsignature permissionで保護されたContentProviderと明示的Broadcastだけで連携します。
 
+## 依存関係の自動更新・公開
+
+Dependabot alertsとsecurity updatesをGitHub側で有効にしています。
+main更新時にGradleの依存一覧をGitHubへ送信し、間接依存も監視します。
+Dependabotが作成したPRのうち、`app/build.gradle.kts`の`implementation`・`testImplementation`の安定版パッチ番号だけを上げる変更を自動処理します。
+メジャー・マイナー更新、プレリリース、Gradleプラグイン・GitHub Actionsの変更、手動コミットを含むPRは手動確認が必要です。
+
+- `main`の必須チェック`Build APK`に成功し、最新のmainに対してマージ可能なPRを自動マージします。
+- `versionCode`を1、`versionName`のパッチ番号を1増やしたコミットを準備し、そのコミットで単体テストと署名付きAPKのビルド・署名検証を行います。
+- 成功したコミットのチェック結果を記録してmainを更新し、`vX.Y.Z`タグとAPK付きGitHub Releaseを公開します。
+- ビルド中にmainが進んだ場合は公開を止め、次回に新しいmainで再検証します。途中で公開が失敗した場合も、公開待ちのバージョンを再利用します。
+
+処理はAndroid buildの成功後に起動し、毎時17分・47分（UTC）にも再確認します。
+再試行はActionsの`Dependabot patch release` → `Run workflow`から実行できます。
+署名には既存の`ANDROID_KEYSTORE_*`・`ANDROID_KEY_*`リポジトリSecretsを使います。
+タグpushによる通常の手動リリースも引き続き利用できます。
+
 ## 実装範囲
 
 - `apiVersion`、`databaseInstanceId`、`clipboardGeneration`、`currentSequence`の検証

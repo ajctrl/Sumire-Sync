@@ -1,0 +1,123 @@
+name: Dependabot patch release
+
+on:
+  workflow_run:
+    workflows: [Android build]
+    types: [completed]
+  # Retry delayed mergeability checks and interrupted releases.
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-patch-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: >-
+      github.repository == 'ajctrl/Sumire-Sync' &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      base: ${{ steps.plan.outputs.base }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      # workflow_run is privileged: always use trusted automation from main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Merge a tested patch and prepare a release commit
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/dependabot_release.py plan
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6
+        with:
+          cache-read-only: true
+      - name: Test and build signed release APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variable in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!variable}" ]]; then
+              echo "::error::Missing release signing secret: ${variable}"
+              exit 1
+            fi
+          done
+          ./gradlew --no-daemon testDebugUnitTest assembleRelease
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify app/build/outputs/apk/release/app-release.apk
+          mkdir -p artifacts
+          cp app/build/outputs/apk/release/app-release.apk "artifacts/Sumire-Sync-v${RELEASE_VERSION}.apk"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: dependabot-release-${{ needs.plan.outputs.sha }}
+          path: artifacts/*.apk
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: dependabot-release-${{ needs.plan.outputs.sha }}
+          path: artifacts
+      # GITHUB_TOKEN pushes do not start another push workflow. Publish here
+      # after this workflow's build, rather than relying on the tag workflow.
+      - name: Advance version and publish the APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.plan.outputs.sha }}
+          RELEASE_BASE: ${{ needs.plan.outputs.base }}
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: python3 .github/scripts/dependabot_release.py publish
+
+  dependencies:
+    needs: publish
+    permissions:
+      contents: write
+    uses: ./.github/workflows/dependency-submission.yml
