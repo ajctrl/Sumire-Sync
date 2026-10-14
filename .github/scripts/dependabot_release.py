@@ -167,6 +167,13 @@ def publish():
         raise RuntimeError("Signed release APK is missing")
     if api("commits/main")["sha"] not in (base, sha):
         raise RuntimeError("main advanced during build; retry to test the new main")
+    existing = [r for r in pages("releases") if r["tag_name"] == tag]
+    if existing and not existing[0]["draft"]:
+        raise RuntimeError(f"{tag} is already published; refusing to replace it")
+    refs = api(f"git/matching-refs/tags/{tag}")
+    matching = [r for r in refs if r["ref"] == f"refs/tags/{tag}"]
+    if matching and matching[0]["object"]["sha"] != sha:
+        raise RuntimeError("Release tag already points to another commit")
     # The build job tested this exact release commit. Record that result so
     # the version-only commit satisfies main's required status check too.
     api(f"statuses/{sha}", "POST", {
@@ -175,15 +182,7 @@ def publish():
         "target_url": f"https://github.com/{REPO}/actions/runs/{os.environ['GITHUB_RUN_ID']}"})
     api("git/refs/heads/main", "PATCH", {"sha": sha, "force": False})
 
-    existing = [r for r in pages("releases") if r["tag_name"] == tag]
-    if existing and not existing[0]["draft"]:
-        raise RuntimeError(f"{tag} is already published; refusing to replace it")
-    refs = api(f"git/matching-refs/tags/{tag}")
-    matching = [r for r in refs if r["ref"] == f"refs/tags/{tag}"]
-    if matching:
-        if matching[0]["object"]["sha"] != sha:
-            raise RuntimeError("Release tag already points to another commit")
-    else:
+    if not matching:
         api("git/refs", "POST", {"ref": f"refs/tags/{tag}", "sha": sha})
     if not existing:
         gh("release", "create", tag, "--repo", REPO, "--draft", "--title", tag,
