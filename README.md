@@ -6,8 +6,10 @@ Sumireのクリップボード履歴を、月次SQLiteアーカイブとしてWe
 
 Dependabot alertsとsecurity updatesをGitHub側で有効にしています。
 main更新時にGradleの依存一覧をGitHubへ送信し、間接依存も監視します。
+`.github/dependabot.yml`でOkHttp・JUnit・Robolectric・Bouncy Castleの更新を平日に毎日確認し、メジャー更新も含めてPRを自動作成します。
 Dependabotが作成したPRのうち、`app/build.gradle.kts`の`implementation`・`testImplementation`の安定版パッチ番号だけを上げる変更を自動処理します。
-メジャー・マイナー更新、プレリリース、Gradleプラグイン・GitHub Actionsの変更、手動コミットを含むPRは手動確認が必要です。
+加えて、OkHttpの5系内、およびテスト依存のJUnit・Robolectric・Bouncy Castleの同一メジャー内のマイナー更新も自動処理します。Bouncy Castleの`1.86 → 1.87`のような2つの番号で構成されるバージョンにも対応します。
+OkHttpの`4 → 5`・`5 → 6`などのメジャー更新、それ以外のマイナー更新、プレリリース、Gradleプラグイン・GitHub Actionsの変更、手動コミットを含むPRは手動確認が必要です。OkHttpの初回5系移行は、ビルド・テストと実機でのNextcloud同期を確認して取り込みます。
 
 - `main`の必須チェック`Build APK`に成功し、最新のmainに対してマージ可能なPRを自動マージします。
 - `versionCode`を1、`versionName`のパッチ番号を1増やしたコミットを準備し、そのコミットで単体テストと署名付きAPKのビルド・署名検証を行います。
@@ -15,7 +17,7 @@ Dependabotが作成したPRのうち、`app/build.gradle.kts`の`implementation`
 - ビルド中にmainが進んだ場合は公開を止め、次回に新しいmainで再検証します。途中で公開が失敗した場合も、公開待ちのバージョンを再利用します。
 
 処理はAndroid buildの成功後に起動し、毎時17分・47分（UTC）にも再確認します。
-再試行はActionsの`Dependabot patch release` → `Run workflow`から実行できます。
+再試行はActionsの`Dependabot dependency release` → `Run workflow`から実行できます。
 署名には既存の`ANDROID_KEYSTORE_*`・`ANDROID_KEY_*`リポジトリSecretsを使います。
 タグpushによる通常の手動リリースも引き続き利用できます。
 

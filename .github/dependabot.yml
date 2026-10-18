@@ -1,0 +1,11 @@
+version: 2
+updates:
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    allow:
+      - dependency-name: "com.squareup.okhttp3:okhttp"
+      - dependency-name: "junit:junit"
+      - dependency-name: "org.robolectric:robolectric"
+      - dependency-name: "org.bouncycastle:bcprov-jdk18on"

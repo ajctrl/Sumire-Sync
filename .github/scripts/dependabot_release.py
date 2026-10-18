@@ -1,4 +1,4 @@
-"""Merge tested, version-only Dependabot patches and publish tested release commits.
+"""Merge eligible, tested Dependabot updates and publish tested release commits.
 
 Only the planning job uses PR data. Signing jobs build an immutable commit based
 on main, never a PR checkout. GitHub's required checks still gate the PR merge.
@@ -44,14 +44,27 @@ def pages(path):
     raise RuntimeError("Pagination limit reached; review manually")
 
 
-def patch_line(before, after):
-    # Exact stable SemVer only. No prereleases, ranges, downgrades, plugin code,
+def eligible_update_line(before, after):
+    # Literal stable versions only. No prereleases, ranges, downgrades, plugin code,
     # app version edits, or arbitrary Gradle expressions are eligible.
-    pattern = (r'(\s*(?:implementation|testImplementation)\("[^"\s]+:[^"\s]+:)'
-               r'(\d+)\.(\d+)\.(\d+)("\)(?:\s*\{)?\s*)')
+    pattern = (r'(?P<prefix>\s*(?P<scope>implementation|testImplementation)\("'
+               r'(?P<artifact>[^"\s]+:[^"\s]+):)'
+               r'(?P<version>\d+\.\d+(?:\.\d+)?)(?P<suffix>"\)(?:\s*\{)?\s*)')
     old, new = re.fullmatch(pattern, before), re.fullmatch(pattern, after)
-    return bool(old and new and old[1] == new[1] and old[5] == new[5]
-                and old.groups()[1:3] == new.groups()[1:3] and int(new[4]) > int(old[4]))
+    if not old or not new or old['prefix'] != new['prefix'] or old['suffix'] != new['suffix']:
+        return False
+    previous = tuple(map(int, old['version'].split('.')))
+    following = tuple(map(int, new['version'].split('.')))
+    if len(previous) != len(following) or previous[0] != following[0] or following <= previous:
+        return False
+    if len(previous) == 3 and previous[1] == following[1]:
+        return True  # Existing patch-update policy for all declared dependencies.
+    if old['scope'] == 'implementation' and old['artifact'] == 'com.squareup.okhttp3:okhttp':
+        return len(previous) == 3 and previous[0] == 5
+    # Bouncy Castle uses two-part releases, e.g. 1.86 -> 1.87.
+    return old['scope'] == 'testImplementation' and old['artifact'] in {
+        'junit:junit', 'org.robolectric:robolectric', 'org.bouncycastle:bcprov-jdk18on',
+    }
 
 
 def eligible(pr):
@@ -67,7 +80,7 @@ def eligible(pr):
     added = [line[1:] for line in patch.splitlines() if line.startswith("+")]
     if (not removed or len(removed) != len(added)
             or len(removed) != file["deletions"] or len(added) != file["additions"]
-            or not all(patch_line(a, b) for a, b in zip(removed, added))):
+            or not all(eligible_update_line(a, b) for a, b in zip(removed, added))):
         return False
     commits = list(pages(f"pulls/{pr['number']}/commits"))
     return bool(commits) and all((c.get("author") or {}).get("login") == BOT for c in commits)
@@ -137,7 +150,7 @@ def plan():
             break
 
     if not pending:
-        print("No tested Dependabot patch is ready for release.")
+        print("No eligible tested Dependabot update is ready for release.")
         return
 
     base = main["sha"]

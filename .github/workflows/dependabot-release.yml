@@ -1,4 +1,4 @@
-name: Dependabot patch release
+name: Dependabot dependency release
 
 on:
   workflow_run:
@@ -37,7 +37,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - name: Merge a tested patch and prepare a release commit
+      - name: Merge an eligible tested update and prepare a release commit
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}

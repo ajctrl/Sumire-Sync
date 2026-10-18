@@ -22,16 +22,60 @@ FILE = {"filename": release.APP, "status": "modified", "deletions": 1, "addition
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_minor_update_policy_boundaries(self):
+        cases = [
+            ('implementation', 'com.squareup.okhttp3:okhttp', '5.5.2', '5.6.0', True),
+            ('implementation', 'com.squareup.okhttp3:okhttp', '5.5.2', '5.10.0', True),
+            ('implementation', 'com.squareup.okhttp3:okhttp', '4.12.0', '5.5.0', False),
+            ('implementation', 'com.squareup.okhttp3:okhttp', '5.5.0', '6.0.0', False),
+            ('implementation', 'com.squareup.okhttp3:okhttp', '6.0.0', '6.1.0', False),
+            ('implementation', 'com.squareup.okhttp3:okhttp', '5.6.0', '5.5.9', False),
+            ('implementation', 'com.squareup.okhttp3:okhttp', '5.5.0', '5.6.0-rc1', False),
+            ('implementation', 'org.example:lib', '5.5.0', '5.6.0', False),
+            ('testImplementation', 'junit:junit', '4.13.2', '4.14.0', True),
+            ('testImplementation', 'org.robolectric:robolectric', '4.14.1', '4.15.0', True),
+            ('testImplementation', 'org.bouncycastle:bcprov-jdk18on', '1.86', '1.87', True),
+            ('testImplementation', 'org.bouncycastle:bcprov-jdk18on', '1.86', '2.0', False),
+            ('testImplementation', 'org.bouncycastle:bcprov-jdk18on', '1.86', '1.85', False),
+            ('testImplementation', 'org.bouncycastle:bcprov-jdk18on', '1.86', '1.86', False),
+            ('testImplementation', 'org.bouncycastle:bcprov-jdk18on', '1.86', '1.87-beta', False),
+            ('testImplementation', 'junit:junit', '4.13.2', '5.0.0', False),
+            ('testImplementation', 'org.robolectric:robolectric', '4.14.1', '5.0.0', False),
+            ('testImplementation', 'org.example:lib', '4.1.0', '4.2.0', False),
+            ('implementation', 'junit:junit', '4.13.2', '4.14.0', False),
+        ]
+        for scope, artifact, old, new, expected in cases:
+            with self.subTest(artifact=artifact, old=old, new=new, scope=scope):
+                # Include the constraint-block syntax used by Bouncy Castle.
+                suffix = ' {' if artifact.startswith('org.bouncycastle:') else ''
+                before = f'    {scope}("{artifact}:{old}"){suffix}'
+                after = f'    {scope}("{artifact}:{new}"){suffix}'
+                self.assertEqual(release.eligible_update_line(before, after), expected)
+
+    def test_mixed_pr_rejects_major_update_even_with_allowed_minor(self):
+        before = '    implementation("com.squareup.okhttp3:okhttp:5.5.0")'
+        after = before.replace('5.5.0', '5.6.0')
+        minor_file = {**FILE, 'patch': f'@@ -1 +1 @@\n-{before}\n+{after}'}
+        with patch.object(release, 'pages', side_effect=[
+                [minor_file], [{'author': {'login': release.BOT}}]]):
+            self.assertTrue(release.eligible(PR))
+        mixed_file = {**minor_file, 'deletions': 2, 'additions': 2,
+                      'patch': minor_file['patch'] +
+                      '\n-    testImplementation("junit:junit:4.13.2")' +
+                      '\n+    testImplementation("junit:junit:5.0.0")'}
+        with patch.object(release, 'pages', return_value=[mixed_file]):
+            self.assertFalse(release.eligible(PR))
+
     def test_only_stable_patch_dependency_changes_are_eligible(self):
-        self.assertTrue(release.patch_line(OLD, NEW))
-        self.assertTrue(release.patch_line(
+        self.assertTrue(release.eligible_update_line(OLD, NEW))
+        self.assertTrue(release.eligible_update_line(
             '        testImplementation("org.example:lib:1.2.3") {',
             '        testImplementation("org.example:lib:1.2.4") {'))
         for version in ("4.13.0", "5.0.0", "4.12.0", "4.11.9", "4.12.2-rc1", "4.12.+"):
-            self.assertFalse(release.patch_line(OLD, NEW.replace("4.12.1", version)))
-        self.assertFalse(release.patch_line(OLD, NEW + '; exec { commandLine("evil") }'))
-        self.assertFalse(release.patch_line(OLD, NEW.replace("okhttp:", "other:")))
-        self.assertFalse(release.patch_line('versionName = "1.0.0"', 'versionName = "1.0.1"'))
+            self.assertFalse(release.eligible_update_line(OLD, NEW.replace("4.12.1", version)))
+        self.assertFalse(release.eligible_update_line(OLD, NEW + '; exec { commandLine("evil") }'))
+        self.assertFalse(release.eligible_update_line(OLD, NEW.replace("okhttp:", "other:")))
+        self.assertFalse(release.eligible_update_line('versionName = "1.0.0"', 'versionName = "1.0.1"'))
 
     def test_rejects_forks_human_commits_and_incomplete_diffs(self):
         def data(path):
@@ -102,13 +146,20 @@ class ReleaseTests(unittest.TestCase):
                 return {"check_runs": [{"name": "Build APK", "conclusion": "failure",
                                          "app": {"slug": "github-actions"}}]}
             return base_api(path, method, data)
-        with patch.object(release, "api", side_effect=api) as calls, \
-                patch.object(release, "pages", side_effect=pages), \
-                patch.object(release, "eligible", return_value=True), \
-                patch.object(release, "output") as output:
-            release.plan()
-            output.assert_not_called()
-            self.assertFalse(any(call.args[0].endswith("/merge") for call in calls.call_args_list))
+        for conclusion in ('failure', None, 'cancelled', 'skipped'):
+            def checked_api(path, method="GET", data=None):
+                result = api(path, method, data)
+                if path.startswith('commits/head/check-runs'):
+                    result['check_runs'][0]['conclusion'] = conclusion
+                return result
+            with self.subTest(conclusion=conclusion), \
+                    patch.object(release, "api", side_effect=checked_api) as calls, \
+                    patch.object(release, "pages", side_effect=pages), \
+                    patch.object(release, "eligible", return_value=True), \
+                    patch.object(release, "output") as output:
+                release.plan()
+                output.assert_not_called()
+                self.assertFalse(any(call.args[0].endswith("/merge") for call in calls.call_args_list))
 
     def test_publish_stops_if_main_advanced(self):
         with tempfile.TemporaryDirectory() as directory:
