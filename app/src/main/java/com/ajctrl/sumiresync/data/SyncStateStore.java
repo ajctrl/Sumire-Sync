@@ -11,7 +11,7 @@ import java.util.List;
 
 public final class SyncStateStore extends SQLiteOpenHelper {
     private static final String DB_NAME = "sync-state.sqlite";
-    private static final int DB_VERSION = 4;
+    private static final int DB_VERSION = 5;
 
     public SyncStateStore(Context context) {
         super(context.getApplicationContext(), DB_NAME, null, DB_VERSION);
@@ -23,7 +23,7 @@ public final class SyncStateStore extends SQLiteOpenHelper {
                 "last_id INTEGER NOT NULL DEFAULT 0, last_error TEXT, last_sync_at INTEGER, " +
                 "request_revision INTEGER NOT NULL DEFAULT 0, " +
                 "handled_request_revision INTEGER NOT NULL DEFAULT 0, " +
-                "upload_generation INTEGER NOT NULL DEFAULT 0)");
+                "upload_generation INTEGER NOT NULL DEFAULT 0, last_sync_completed_at INTEGER)");
         db.execSQL("INSERT INTO sync_state(singleton,last_id) VALUES(1,0)");
         db.execSQL("CREATE TABLE gaps (database_instance_id TEXT NOT NULL, generation INTEGER NOT NULL, " +
                 "source_id INTEGER NOT NULL, end_source_id INTEGER NOT NULL, " +
@@ -45,6 +45,9 @@ public final class SyncStateStore extends SQLiteOpenHelper {
         if (oldVersion < 4) {
             db.execSQL("ALTER TABLE sync_state ADD COLUMN upload_generation INTEGER NOT NULL DEFAULT 0");
         }
+        if (oldVersion < 5) {
+            db.execSQL("ALTER TABLE sync_state ADD COLUMN last_sync_completed_at INTEGER");
+        }
     }
 
     public synchronized State read() {
@@ -57,6 +60,7 @@ public final class SyncStateStore extends SQLiteOpenHelper {
                     cursor.getLong(cursor.getColumnIndexOrThrow("last_id")),
                     cursor.getString(cursor.getColumnIndexOrThrow("last_error")),
                     nullableLong(cursor, "last_sync_at"),
+                    nullableLong(cursor, "last_sync_completed_at"),
                     cursor.getLong(cursor.getColumnIndexOrThrow("request_revision")),
                     cursor.getLong(cursor.getColumnIndexOrThrow("handled_request_revision")),
                     dirtyArchiveCount());
@@ -131,6 +135,16 @@ public final class SyncStateStore extends SQLiteOpenHelper {
             if (!cursor.moveToFirst()) throw new IllegalStateException("sync state is missing");
             return cursor.getInt(0) != 0;
         }
+    }
+
+    public synchronized void markSyncCompleted(long generation) {
+        // Check all completion conditions in one statement, including writes by other workers.
+        getWritableDatabase().execSQL(
+                "UPDATE sync_state SET last_sync_completed_at=? WHERE singleton=1 "
+                        + "AND upload_generation=? AND database_instance_id IS NOT NULL "
+                        + "AND request_revision=handled_request_revision AND last_error IS NULL "
+                        + "AND NOT EXISTS (SELECT 1 FROM dirty_archives WHERE revision>uploaded_revision)",
+                new Object[]{System.currentTimeMillis(), generation});
     }
 
     public synchronized void recordGap(String instanceId, int generation, long sourceId, String reason) {
@@ -237,12 +251,13 @@ public final class SyncStateStore extends SQLiteOpenHelper {
         public final long lastId;
         public final String lastError;
         public final Long lastSyncAt;
+        public final Long lastSyncCompletedAt;
         public final long requestRevision;
         public final long handledRequestRevision;
         public final int dirtyArchiveCount;
 
         State(Integer apiVersion, String instanceId, Integer generation, long lastId,
-              String lastError, Long lastSyncAt, long requestRevision,
+              String lastError, Long lastSyncAt, Long lastSyncCompletedAt, long requestRevision,
               long handledRequestRevision, int dirtyArchiveCount) {
             this.apiVersion = apiVersion;
             this.instanceId = instanceId;
@@ -250,6 +265,7 @@ public final class SyncStateStore extends SQLiteOpenHelper {
             this.lastId = lastId;
             this.lastError = lastError;
             this.lastSyncAt = lastSyncAt;
+            this.lastSyncCompletedAt = lastSyncCompletedAt;
             this.requestRevision = requestRevision;
             this.handledRequestRevision = handledRequestRevision;
             this.dirtyArchiveCount = dirtyArchiveCount;

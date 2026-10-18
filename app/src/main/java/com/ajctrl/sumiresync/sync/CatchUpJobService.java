@@ -10,6 +10,7 @@ import java.util.IdentityHashMap;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 
 public final class CatchUpJobService extends JobService {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -40,39 +41,35 @@ public final class CatchUpJobService extends JobService {
 
     private void runJob(JobParameters params) {
         boolean retry = true;
-        try (SyncStateStore states = new SyncStateStore(this)) {
-            long requestedRevision = states.requestRevision();
-            BatchOutcome outcome = runBatches(params);
-            if (!isStopped(params)) {
-                if (outcome.caughtUp) states.markRequestHandled(requestedRevision);
-                retry = !outcome.succeeded || !outcome.caughtUp || states.hasPendingRequest();
-            }
+        try (SyncStateStore states = new SyncStateStore(this);
+             SyncEngine engine = new SyncEngine(this)) {
+            retry = !catchUp(params, states,
+                    () -> engine.runBatch(SumireContract.CATCH_UP_BATCH_SIZE));
         } catch (RuntimeException ignored) {
             retry = true;
         } finally {
-            SyncScheduler.scheduleUploadIfDirty(this);
+            // Also confirm completion when catch-up found no new data, or an upload
+            // finished before this worker acknowledged the local sync request.
+            if (!retry) SyncScheduler.scheduleUpload(this);
+            else SyncScheduler.scheduleUploadIfDirty(this);
             finishUnlessStopped(params, retry);
         }
     }
 
-    private BatchOutcome runBatches(JobParameters params) {
-        try (SyncEngine engine = new SyncEngine(this)) {
-            for (int batch = 0; batch < 20 && !isStopped(params); batch++) {
-                SyncEngine.Result result = engine.runBatch(SumireContract.CATCH_UP_BATCH_SIZE);
-                if (!result.success) return new BatchOutcome(false, false);
-                if (!result.mayHaveMore) return new BatchOutcome(true, true);
+    boolean catchUp(JobParameters params, SyncStateStore states,
+                    Supplier<SyncEngine.Result> nextBatch) {
+        // Periodic jobs bypass requestCatchUp(). Persist a pending request for every
+        // execution before reading data, and retain it across partial or stopped runs.
+        long requestedRevision = states.requestSync();
+        for (int batch = 0; batch < 20 && !isStopped(params); batch++) {
+            SyncEngine.Result result = nextBatch.get();
+            if (!result.success) return false;
+            if (!result.mayHaveMore) {
+                if (isStopped(params)) return false;
+                states.markRequestHandled(requestedRevision);
+                return !states.hasPendingRequest();
             }
         }
-        return new BatchOutcome(true, false);
-    }
-
-    private static final class BatchOutcome {
-        final boolean succeeded;
-        final boolean caughtUp;
-
-        BatchOutcome(boolean succeeded, boolean caughtUp) {
-            this.succeeded = succeeded;
-            this.caughtUp = caughtUp;
-        }
+        return false;
     }
 }

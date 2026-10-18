@@ -67,8 +67,7 @@ public final class UploadJobService extends JobService {
                 if (isStopped(params) || settings.uploadGeneration() != destination.generation) return false;
                 List<SyncStateStore.DirtyArchive> dirty = states.dirtyArchives();
                 if (dirty.isEmpty()) {
-                    states.clearUploadError();
-                    return true;
+                    return completeSync(params, settings, destination, states);
                 }
                 for (SyncStateStore.DirtyArchive entry : dirty) {
                     if (isStopped(params) || settings.uploadGeneration() != destination.generation) return false;
@@ -85,8 +84,17 @@ public final class UploadJobService extends JobService {
                 }
             }
             boolean complete = states.dirtyArchives().isEmpty();
-            if (complete) states.clearUploadError();
-            return complete;
+            return complete && completeSync(params, settings, destination, states);
+        }
+    }
+
+    private boolean completeSync(JobParameters params, AppSettings settings,
+                                 AppSettings.UploadSettings destination, SyncStateStore states) {
+        synchronized (stoppedJobs) {
+            if (isStopped(params) || settings.uploadGeneration() != destination.generation) return false;
+            states.clearUploadError();
+            states.markSyncCompleted(destination.generation);
+            return true;
         }
     }
 

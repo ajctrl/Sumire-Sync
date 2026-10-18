@@ -240,6 +240,8 @@ public final class MainActivity extends Activity {
         value.append("lastId: ").append(state.lastId).append('\n');
         value.append("最終ローカル保存: ").append(state.lastSyncAt == null ? "—" :
                 DateFormat.getDateTimeInstance().format(new Date(state.lastSyncAt))).append('\n');
+        value.append("最終同期完了: ").append(state.lastSyncCompletedAt == null ? "—" :
+                DateFormat.getDateTimeInstance().format(new Date(state.lastSyncCompletedAt))).append('\n');
         value.append("Usage Access: ").append(hasUsageAccess() ? "許可" : "未許可").append('\n');
         if (state.lastError != null) value.append("エラー: ").append(state.lastError).append('\n');
         if (connectedAuthority == null) {

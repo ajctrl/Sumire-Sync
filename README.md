@@ -77,6 +77,8 @@ Broadcast actionは`${packageId}.action.CLIPBOARD_CHANGED`、permissionは`${pac
 
 WebDAV未設定でもSumireから月次SQLiteへのローカル保存は継続します。設定後、未アップロードのrevisionが順次送信されます。
 
+画面の「最終ローカル保存」と「最終同期完了」は別々に記録します。「最終同期完了」は、WebDAV設定済みでローカル同期と全アーカイブの送信が完了し、エラーがない場合に更新します。新しいデータがない同期も対象です。未完了・失敗時は前回の完了日時を保持し、初回の完了前（アプリ更新後を含む）は「—」を表示します。
+
 ## 月次SQLite schema
 
 主要テーブルは`clipboard_items`です。元データの識別情報、type、作成時刻、preview、本文の格納方式・サイズ、任意のforeground package/app labelに加え、フラグがONの間に同期した項目を示す`is_flagged`を保持します。フラグのトグルは設定時間後に自動でOFFになりますが、保存済みの`is_flagged`は変更しません。テキスト本文は`clipboard_content_chunks`へ64 KiB単位で保存され、同じ元データキーの`chunk_index`昇順で復元できます。旧schemaから移行した本文だけは`content_storage = INLINE`として`clipboard_items.content`に残ります。
