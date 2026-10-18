@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLException;
 
 import okhttp3.Credentials;
+import okhttp3.Call;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -25,42 +26,80 @@ public final class WebDavClient {
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
+            .callTimeout(120, TimeUnit.SECONDS)
             .followRedirects(false)
             .followSslRedirects(false)
             .build();
     private final OkHttpClient client;
+    private boolean cancelled;
+    private Call activeCall;
 
     public WebDavClient() { this(CLIENT); }
 
     WebDavClient(OkHttpClient client) { this.client = client; }
 
-    public void put(String serverUrl, String username, String password, File file) throws IOException {
-        String normalizedUsername = username.trim();
-        URL target = NextcloudUrl.archiveUrl(serverUrl, normalizedUsername, file.getName());
-        URL collection = NextcloudUrl.archiveUrl(serverUrl, normalizedUsername, "");
-        String authorization = Credentials.basic(normalizedUsername, password, StandardCharsets.UTF_8);
-        // HttpURLConnection rejects WebDAV extension methods such as MKCOL on Android.
-        Request createCollection = new Request.Builder().url(collection)
-                .header("Authorization", authorization)
-                .method("MKCOL", RequestBody.create(null, new byte[0])).build();
-        execute(createCollection, true);
-        Request upload = new Request.Builder().url(target)
-                .header("Authorization", authorization)
-                .put(RequestBody.create(MediaType.get("application/vnd.sqlite3"), file)).build();
-        execute(upload, false);
+    public synchronized void cancel() {
+        cancelled = true;
+        if (activeCall != null) activeCall.cancel();
     }
 
-    private void execute(Request request, boolean creatingCollection) throws IOException {
+    public void put(String serverUrl, String username, String password, String installationId, File file) throws IOException {
+        String normalizedUsername = username.trim();
+        URL target = NextcloudUrl.archiveUrl(serverUrl, normalizedUsername, installationId, file.getName());
+        URL collection = NextcloudUrl.archiveUrl(serverUrl, normalizedUsername, installationId, "");
+        String authorization = Credentials.basic(normalizedUsername, password, StandardCharsets.UTF_8);
+        // HttpURLConnection rejects WebDAV extension methods such as MKCOL on Android.
+        for (URL directory : new URL[]{NextcloudUrl.collectionUrl(serverUrl, normalizedUsername), collection}) {
+            execute(new Request.Builder().url(directory).header("Authorization", authorization)
+                    .method("MKCOL", RequestBody.create(null, new byte[0])).build(), true);
+        }
+        String etag = execute(new Request.Builder().url(target)
+                .header("Authorization", authorization).head().build(), false);
+        Request.Builder upload = new Request.Builder().url(target)
+                .header("Authorization", authorization)
+                .put(RequestBody.create(MediaType.get("application/vnd.sqlite3"), file));
+        // A cancelled/timed-out request can still reach the server. Conditional writes
+        // prevent that older request from replacing a newer successful upload.
+        if (etag == null) upload.header("If-None-Match", "*");
+        else upload.header("If-Match", etag);
+        execute(upload.build(), false);
+    }
+
+    private String execute(Request request, boolean creatingCollection) throws IOException {
         URL target = request.url().url();
-        try (Response response = client.newCall(request).execute()) {
+        Call call;
+        synchronized (this) {
+            if (cancelled) throw new IOException("Upload cancelled");
+            call = client.newCall(request);
+            activeCall = call;
+        }
+        try (Response response = call.execute()) {
+            if ("HEAD".equals(request.method()) && response.code() == 404) return null;
             // RFC 4918: MKCOL returns 405 when the collection already exists.
             if (!response.isSuccessful() && !(creatingCollection && response.code() == 405)) {
-                throw httpError(response, target);
+                HttpStatusException error = httpError(response, target);
+                int code = response.code();
+                // Authentication, rate limiting, quota, collection and server failures
+                // affect the destination. Resource conflicts/rejections affect this file.
+                if (!creatingCollection && (code == 403 || code == 404 || code == 405
+                        || code == 409 || code == 412 || code == 413 || code == 415
+                        || code == 422 || code == 423)) {
+                    throw new ArchiveUploadException(error.getMessage());
+                }
+                throw error;
             }
-        } catch (HttpStatusException error) {
+            String etag = response.header("ETag");
+            if ("HEAD".equals(request.method()) && (etag == null || !etag.startsWith("\"")
+                    || !etag.endsWith("\"") || etag.length() < 2)) {
+                throw new ArchiveUploadException("Server did not return a strong ETag; refusing an unsafe overwrite");
+            }
+            return etag;
+        } catch (HttpStatusException | ArchiveUploadException error) {
             throw error;
         } catch (IOException error) {
             throw connectionError(target, error);
+        } finally {
+            synchronized (this) { if (activeCall == call) activeCall = null; }
         }
     }
 

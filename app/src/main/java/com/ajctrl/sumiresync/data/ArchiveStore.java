@@ -3,8 +3,10 @@ package com.ajctrl.sumiresync.data;
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.DatabaseUtils;
+import android.database.DatabaseErrorHandler;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteConstraintException;
+import android.database.sqlite.SQLiteDatabaseCorruptException;
 import android.database.sqlite.SQLiteException;
 
 import java.io.File;
@@ -12,17 +14,33 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TimeZone;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 
 public final class ArchiveStore {
     private static final int ARCHIVE_VERSION = 3;
     private static final int CONTENT_CHUNK_BYTES = 64 * 1024;
+    // Decimal MB. Items remain atomic, so the last item may exceed this threshold.
+    public static final long MAX_ARCHIVE_BYTES = 10_000_000L;
     private static final Map<String, Object> LOCKS = new ConcurrentHashMap<>();
+    private static final DatabaseErrorHandler PRESERVE_CORRUPT_ARCHIVE = db -> {
+        // Android's default handler deletes the file and retries opening an empty DB.
+        throw new SQLiteDatabaseCorruptException("Archive is corrupt; file preserved, upload stopped: "
+                + db.getPath());
+    };
     private final Context context;
     private final SyncStateStore stateStore;
 
@@ -32,16 +50,47 @@ public final class ArchiveStore {
     }
 
     public String fileNameFor(long createdAt) {
-        String month = new SimpleDateFormat("yyyy-MM", Locale.ROOT).format(new Date(createdAt));
+        validateCreatedAt(createdAt);
+        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM", Locale.ROOT);
+        format.setTimeZone(TimeZone.getTimeZone("UTC"));
+        String month = format.format(new Date(createdAt));
         return "clipboard-" + month + ".sqlite";
+    }
+
+    public static void validateCreatedAt(long createdAt) {
+        // The archive contract uses exactly four year digits (10000-01-01 UTC is excluded).
+        if (createdAt < 0 || createdAt >= 253402300800000L) {
+            throw new IllegalArgumentException("Provider returned an unsupported createdAt: " + createdAt);
+        }
     }
 
     public void save(SyncStatus status, ClipboardItem item, InputStream content,
                      String foregroundPackage, String foregroundAppName,
                      boolean flagged, Runnable validateSource) throws IOException {
-        String fileName = fileNameFor(item.createdAt);
+        save(status, item, content, foregroundPackage, foregroundAppName, flagged,
+                validateSource, () -> false);
+    }
+
+    public void save(SyncStatus status, ClipboardItem item, InputStream content,
+                     String foregroundPackage, String foregroundAppName,
+                     boolean flagged, Runnable validateSource, BooleanSupplier stopped) throws IOException {
+        // Selection and rollover must be serialized as well as writes to each file.
+        synchronized (lock("month:" + fileNameFor(item.createdAt))) {
+            saveInPart(status, item, content, foregroundPackage, foregroundAppName,
+                    flagged, validateSource, stopped);
+        }
+    }
+
+    private void saveInPart(SyncStatus status, ClipboardItem item, InputStream content,
+                            String foregroundPackage, String foregroundAppName,
+                            boolean flagged, Runnable validateSource, BooleanSupplier stopped) throws IOException {
+        if (stopped.getAsBoolean()) throw new IOException("Sync cancelled");
+        String fileName = fileNameForSave(status, item);
         synchronized (lock(fileName)) {
-            SQLiteDatabase db = open(fileName);
+            // Durable intent precedes the separate archive commit. Recovery does not need
+            // the source item to still exist, and completion is blocked while this intent exists.
+            stateStore.reserveArchiveItem(fileName, status, item.id);
+            SQLiteDatabase db = open(fileName, true);
             try {
                 db.beginTransaction();
                 try {
@@ -67,7 +116,7 @@ public final class ArchiveStore {
                             throw new SQLiteConstraintException("Clipboard archive insert was rejected");
                         }
                     } else {
-                        long contentSize = insertChunks(db, status, item.id, content);
+                        long contentSize = insertChunks(db, status, item.id, content, stopped);
                         ContentValues size = new ContentValues();
                         size.put("content_size", contentSize);
                         int updated = db.update("clipboard_items", size,
@@ -82,11 +131,60 @@ public final class ArchiveStore {
                 } finally {
                     db.endTransaction();
                 }
-                // Also mark an idempotent retry dirty. The archive insert and sync-state update
-                // live in separate SQLite files; this closes the crash window between them.
-                stateStore.markDirty(fileName);
+                stateStore.finishArchiveWrite(fileName, true);
             } finally {
                 db.close();
+            }
+        }
+    }
+
+    private String fileNameForSave(SyncStatus status, ClipboardItem item) {
+        String canonical = fileNameFor(item.createdAt);
+        // New writes reserve their identity before touching the archive. A retry can
+        // find its file even after rollback, process death, rollover, or file loss.
+        String reserved = stateStore.archiveForItem(status, item.id);
+        if (reserved != null) return reserved;
+        List<String> parts = partsFor(canonical);
+        if (parts.isEmpty()) return canonical;
+        String latest = parts.get(parts.size() - 1);
+        File latestFile = StoragePaths.database(context, latest);
+        if (!latestFile.isFile() && stateStore.archiveInitialized(latest)) {
+            stateStore.requeueUnavailableArchive(latest);
+        } else if (latestFile.length() < MAX_ARCHIVE_BYTES) {
+            return latest;
+        }
+        long next = Math.addExact(partNumber(latest), 1);
+        return canonical.substring(0, canonical.length() - ".sqlite".length())
+                + String.format(Locale.ROOT, "-%03d.sqlite", next);
+    }
+
+    private List<String> partsFor(String canonical) {
+        String prefix = canonical.substring(0, canonical.length() - ".sqlite".length()) + "-";
+        List<String> result = new ArrayList<>();
+        for (String name : stateStore.archiveFiles()) {
+            if (isArchiveFileName(name) && (name.equals(canonical) || name.startsWith(prefix))) {
+                result.add(name);
+            }
+        }
+        result.sort(Comparator.comparingLong(ArchiveStore::partNumber));
+        return result;
+    }
+
+    private static long partNumber(String name) {
+        String stem = name.substring(0, name.length() - ".sqlite".length());
+        return stem.length() == "clipboard-YYYY-MM".length() ? 0
+                : Long.parseLong(stem.substring("clipboard-YYYY-MM-".length()));
+    }
+
+    public void recoverPendingWrites() {
+        for (String fileName : stateStore.pendingArchiveWrites()) {
+            if (!isArchiveFileName(fileName)) {
+                stateStore.discardInvalidArchiveReservation(fileName);
+                continue;
+            }
+            synchronized (lock(fileName)) {
+                SQLiteDatabase.deleteDatabase(new File(StoragePaths.database(context, fileName).getPath() + ".initializing"));
+                stateStore.finishArchiveWrite(fileName, StoragePaths.database(context, fileName).isFile());
             }
         }
     }
@@ -94,11 +192,20 @@ public final class ArchiveStore {
     public File snapshot(String fileName) throws IOException {
         validateFileName(fileName);
         synchronized (lock(fileName)) {
-            SQLiteDatabase db = open(fileName);
-            db.close();
-            File source = context.getDatabasePath(fileName);
+            if (!StoragePaths.database(context, fileName).isFile()) {
+                throw new IOException("Archive is missing: " + fileName);
+            }
+            try (SQLiteDatabase db = open(fileName, false)) {
+                if (!db.isDatabaseIntegrityOk()) {
+                    throw new SQLiteDatabaseCorruptException("Archive integrity check failed; upload stopped: "
+                            + fileName);
+                }
+            }
+            File source = StoragePaths.database(context, fileName);
             // Keep the remote-visible basename exactly as specified by the monthly contract.
-            File target = new File(context.getCacheDir(), fileName);
+            File directory = new File(context.getCacheDir(), "upload-" + UUID.randomUUID());
+            if (!directory.mkdir()) throw new IOException("Cannot create snapshot directory");
+            File target = new File(directory, fileName);
             try (FileChannel input = new FileInputStream(source).getChannel();
                  FileChannel output = new FileOutputStream(target, false).getChannel()) {
                 long position = 0;
@@ -108,34 +215,90 @@ public final class ArchiveStore {
                     position += transferred;
                 }
                 output.force(true);
+            } catch (IOException | RuntimeException error) {
+                deleteSnapshot(target);
+                throw error;
             }
             return target;
         }
     }
 
-    private SQLiteDatabase open(String fileName) {
+    public static void deleteSnapshot(File snapshot) {
+        if (!snapshot.exists() || snapshot.delete()) snapshot.getParentFile().delete();
+    }
+
+    // Only call while holding the process-wide upload lock, before making a new snapshot.
+    public void clearAbandonedSnapshots() {
+        File[] directories = context.getCacheDir().listFiles(file -> file.isDirectory()
+                && file.getName().matches("upload-[0-9a-f-]{36}"));
+        if (directories == null) return;
+        for (File directory : directories) {
+            File[] files = directory.listFiles();
+            if (files == null) continue;
+            for (File file : files) {
+                if (isArchiveFileName(file.getName())) file.delete();
+            }
+            directory.delete();
+        }
+    }
+
+    private SQLiteDatabase open(String fileName, boolean allowCreate) {
         validateFileName(fileName);
-        File file = context.getDatabasePath(fileName);
+        File file = StoragePaths.database(context, fileName);
         File parent = file.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
             throw new SQLiteException("Cannot create database directory");
         }
-        SQLiteDatabase db = SQLiteDatabase.openOrCreateDatabase(file, null);
+        if (!file.exists() && allowCreate) {
+            if (stateStore.archiveInitialized(fileName)) {
+                stateStore.requeueUnavailableArchive(fileName);
+                throw new SQLiteException("Archive is missing; refusing to recreate: " + fileName);
+            }
+            initializeArchive(file);
+        }
+        if (file.exists() && file.length() == 0) {
+            throw new SQLiteDatabaseCorruptException("Existing archive is empty; file preserved: " + fileName);
+        }
+        SQLiteDatabase db = SQLiteDatabase.openDatabase(file.getPath(), null, SQLiteDatabase.OPEN_READWRITE,
+                PRESERVE_CORRUPT_ARCHIVE);
         try {
             int version = db.getVersion();
             if (version == 0) {
-                createArchiveSchema(db);
-            } else if (version == 1) {
-                migrateArchiveFromV1(db);
-            } else if (version == 2) {
-                migrateArchiveFromV2(db);
+                throw new SQLiteDatabaseCorruptException("Existing archive has no schema; file preserved: "
+                        + fileName);
             } else if (version != ARCHIVE_VERSION) {
                 throw new SQLiteException("Unsupported archive database version: " + version);
             }
+            stateStore.markArchiveInitialized(fileName);
             return db;
         } catch (RuntimeException error) {
             db.close();
             throw error;
+        }
+    }
+
+    private static void initializeArchive(File file) {
+        // A crash can leave only this private staging file, never an incomplete
+        // archive under its final name. Retry discards staging and starts again.
+        File staging = new File(file.getPath() + ".initializing");
+        SQLiteDatabase.deleteDatabase(staging);
+        try {
+            try (SQLiteDatabase db = SQLiteDatabase.openDatabase(staging.getPath(), null,
+                    SQLiteDatabase.OPEN_READWRITE | SQLiteDatabase.CREATE_IF_NECESSARY,
+                    PRESERVE_CORRUPT_ARCHIVE)) {
+                db.disableWriteAheadLogging();
+                createArchiveSchema(db);
+            }
+            try (RandomAccessFile output = new RandomAccessFile(staging, "rw")) {
+                output.getFD().sync();
+            }
+            Files.move(staging.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException error) {
+            SQLiteException failure = new SQLiteException("Cannot initialize archive: " + file.getName());
+            failure.initCause(error);
+            throw failure;
+        } finally {
+            SQLiteDatabase.deleteDatabase(staging);
         }
     }
 
@@ -166,41 +329,8 @@ public final class ArchiveStore {
                 "PRIMARY KEY(database_instance_id,clipboard_generation,source_id,chunk_index))");
     }
 
-    private static void migrateArchiveFromV1(SQLiteDatabase db) {
-        db.beginTransaction();
-        try {
-            db.execSQL("ALTER TABLE clipboard_items RENAME TO clipboard_items_v1");
-            db.execSQL("DROP INDEX IF EXISTS idx_clipboard_created_at");
-            createArchiveTables(db);
-            db.execSQL("INSERT INTO clipboard_items(" +
-                    "database_instance_id,clipboard_generation,source_id,item_type,created_at," +
-                    "is_pinned,preview,content,content_storage,content_size,foreground_package," +
-                    "foreground_app_name,is_flagged,archived_at) SELECT database_instance_id," +
-                    "clipboard_generation,source_id,item_type,created_at,is_pinned,preview,content," +
-                    "'INLINE',length(content),foreground_package,foreground_app_name,0,archived_at " +
-                    "FROM clipboard_items_v1");
-            db.execSQL("DROP TABLE clipboard_items_v1");
-            db.setVersion(ARCHIVE_VERSION);
-            db.setTransactionSuccessful();
-        } finally {
-            db.endTransaction();
-        }
-    }
-
-    private static void migrateArchiveFromV2(SQLiteDatabase db) {
-        db.beginTransaction();
-        try {
-            db.execSQL("ALTER TABLE clipboard_items ADD COLUMN " +
-                    "is_flagged INTEGER NOT NULL DEFAULT 0");
-            db.setVersion(ARCHIVE_VERSION);
-            db.setTransactionSuccessful();
-        } finally {
-            db.endTransaction();
-        }
-    }
-
     private static long insertChunks(SQLiteDatabase db, SyncStatus status, long sourceId,
-                                     InputStream input) throws IOException {
+                                     InputStream input, BooleanSupplier stopped) throws IOException {
         return ContentChunker.copy(input, CONTENT_CHUNK_BYTES, (chunkIndex, chunk) -> {
             ContentValues values = new ContentValues();
             values.put("database_instance_id", status.databaseInstanceId);
@@ -211,7 +341,7 @@ public final class ArchiveStore {
             if (db.insertOrThrow("clipboard_content_chunks", null, values) == -1) {
                 throw new SQLiteException("Cannot save clipboard content chunk");
             }
-        });
+        }, stopped);
     }
 
     private static boolean itemExists(SQLiteDatabase db, SyncStatus status, long sourceId) {
@@ -231,8 +361,12 @@ public final class ArchiveStore {
     }
 
     private static void validateFileName(String fileName) {
-        if (!fileName.matches("clipboard-[0-9]{4}-[0-9]{2}\\.sqlite")) {
+        if (!isArchiveFileName(fileName)) {
             throw new IllegalArgumentException("Invalid archive file name");
         }
+    }
+
+    public static boolean isArchiveFileName(String fileName) {
+        return fileName != null && fileName.matches("clipboard-[0-9]{4}-[0-9]{2}(?:-[0-9]{3,})?\\.sqlite");
     }
 }

@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.app.AppOpsManager;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.database.sqlite.SQLiteException;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Typeface;
@@ -26,6 +27,7 @@ import android.text.Spanned;
 import android.text.style.ImageSpan;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
@@ -48,6 +50,8 @@ import java.util.Date;
 import java.util.Calendar;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final long STATUS_REFRESH_MILLIS = 1_500;
@@ -91,6 +95,9 @@ public final class MainActivity extends Activity {
     private Disclosure optionsSection;
     private boolean detailsExpanded;
     private Handler statusHandler;
+    private final ExecutorService stateExecutor = Executors.newSingleThreadExecutor();
+    private boolean statusReadPending;
+    private boolean statusResumed;
     private final Runnable statusRefresh = new Runnable() {
         @Override public void run() {
             if (status != null) refreshStatus();
@@ -108,19 +115,31 @@ public final class MainActivity extends Activity {
             connectionSection.setExpanded(state.getBoolean("connectionExpanded"));
             optionsSection.setExpanded(state.getBoolean("optionsExpanded"));
         }
-        SyncScheduler.requestCatchUp(this);
-        SyncScheduler.schedulePeriodicCatchUp(this);
+        stateExecutor.execute(() -> {
+            SyncScheduler.requestCatchUp(getApplicationContext());
+            SyncScheduler.schedulePeriodicCatchUp(getApplicationContext());
+        });
     }
 
     @Override protected void onResume() {
         super.onResume();
+        statusResumed = true;
         statusHandler.removeCallbacks(statusRefresh);
         statusRefresh.run();
     }
 
     @Override protected void onPause() {
+        statusResumed = false;
         statusHandler.removeCallbacks(statusRefresh);
         super.onPause();
+    }
+
+    @Override protected void onDestroy() {
+        statusHandler.removeCallbacksAndMessages(null);
+        // Persist already requested syncs even if the screen is closed or rotated.
+        // Their callbacks check isDestroyed() before touching the old UI.
+        stateExecutor.shutdown();
+        super.onDestroy();
     }
 
     @Override protected void onSaveInstanceState(Bundle state) {
@@ -150,10 +169,10 @@ public final class MainActivity extends Activity {
 
         connectionSection = new Disclosure("接続設定", UiIcon.Kind.CLOUD);
         LinearLayout connection = connectionSection.body;
-        url = labeledField(connection, "NextcloudサーバーURL", "https://cloud.example.com");
+        url = labeledField(connection, R.id.server_url, "NextcloudサーバーURL", "https://cloud.example.com");
         url.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        user = labeledField(connection, "ユーザー名", "ユーザー名を入力");
-        password = labeledField(connection, "パスワード / アプリパスワード", "パスワードを入力");
+        user = labeledField(connection, R.id.server_user, "ユーザー名", "ユーザー名を入力");
+        password = labeledField(connection, R.id.server_password, "パスワード / アプリパスワード", "パスワードを入力");
         password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         Button save = actionButton("設定を保存して同期", true);
         save.setOnClickListener(v -> saveAndSync());
@@ -203,8 +222,15 @@ public final class MainActivity extends Activity {
         addSection(root, optionsSection.card);
 
         ScrollView scroll = new ScrollView(this);
+        scroll.setId(R.id.main_scroll);
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(0xfff7f2fa);
+        scroll.setOnApplyWindowInsetsListener((view, insets) -> {
+            android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars()
+                    | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            return insets;
+        });
         scroll.addView(root);
         root.requestFocus();
         return scroll;
@@ -294,7 +320,7 @@ public final class MainActivity extends Activity {
         title.setCompoundDrawablesRelativeWithIntrinsicBounds(
                 new UiIcon(UiIcon.Kind.SYNC, 0xff6750a4, dp(28)), null, null, null);
         title.setCompoundDrawablePadding(dp(12));
-        if (Build.VERSION.SDK_INT >= 28) title.setAccessibilityHeading(true);
+        title.setAccessibilityHeading(true);
         headline.addView(title, stacked ? fullWidth() : new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         statusBadge = new LinearLayout(this);
@@ -305,7 +331,7 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(16), dp(16));
         iconParams.setMarginEnd(dp(6));
         statusBadge.addView(statusIcon, iconParams);
-        status = text("", 12);
+        status = text("確認中…", 12);
         status.setMaxWidth(dp(128));
         status.setTypeface(null, Typeface.BOLD);
         statusBadge.addView(status);
@@ -379,11 +405,7 @@ public final class MainActivity extends Activity {
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         sync.setText(syncLabel);
         sync.setContentDescription("今すぐ同期");
-        sync.setOnClickListener(v -> {
-            SyncScheduler.requestManualSync(this);
-            Toast.makeText(this, "同期を開始しました", Toast.LENGTH_SHORT).show();
-            refreshStatus();
-        });
+        sync.setOnClickListener(v -> requestSync(false));
         detailsToggle = new Button(this, null, android.R.attr.borderlessButtonStyle);
         detailsToggle.setTextColor(0xff6750a4);
         detailsToggle.setTextSize(14);
@@ -528,33 +550,65 @@ public final class MainActivity extends Activity {
             url.setText(value);
             connectionSection.setExpanded(false);
             refreshSettingsSummaries();
-            SyncScheduler.requestManualSync(this);
-            Toast.makeText(this, "設定を保存して同期を開始しました", Toast.LENGTH_SHORT).show();
-            refreshStatus();
+            requestSync(true);
         } catch (Exception error) {
             Toast.makeText(this, "設定を保存できません: " + error.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 
+    private void requestSync(boolean settingsSaved) {
+        stateExecutor.execute(() -> {
+            boolean scheduled = SyncScheduler.requestManualSync(getApplicationContext());
+            statusHandler.post(() -> {
+                if (isDestroyed()) return;
+                String message = scheduled ? "同期を予約しました" : "同期を予約できませんでした";
+                Toast.makeText(this, (settingsSaved ? "設定を保存しました。" : "") + message,
+                        Toast.LENGTH_SHORT).show();
+                refreshStatus();
+            });
+        });
+    }
+
     private void refreshStatus() {
         refreshFlagUi();
-        SyncStateStore.State state;
-        try (SyncStateStore states = new SyncStateStore(this)) {
-            state = states.read();
-        }
+        // Coalesce timer ticks while a DB operation is waiting; never queue unbounded reads.
+        if (statusReadPending || isDestroyed()) return;
+        statusReadPending = true;
+        stateExecutor.execute(() -> {
+            try (SyncStateStore states = new SyncStateStore(getApplicationContext())) {
+                SyncStateStore.State state = states.read();
+                statusHandler.post(() -> finishStatusRead(state, null));
+            } catch (SQLiteException error) {
+                statusHandler.post(() -> finishStatusRead(null, error));
+            }
+        });
+    }
+
+    private void finishStatusRead(SyncStateStore.State state, SQLiteException error) {
+        statusReadPending = false;
+        if (!statusResumed || isDestroyed()) return;
+        if (error != null) showStateReadError(error);
+        else showState(state);
+    }
+
+    private void showState(SyncStateStore.State state) {
         AppSettings settings = new AppSettings(this);
         String connectedAuthority = settings.connectedProviderAuthority();
-        status.setText(syncProgress(state));
+        boolean configured = !settings.webDavUrl().isEmpty() && !settings.webDavUser().isEmpty();
+        status.setText(syncProgress(state, configured));
         boolean syncing = state.requestRevision > state.handledRequestRevision
-                || state.dirtyArchiveCount > 0;
+                || (configured && (state.dirtyArchiveCount > 0
+                || (state.requestRevision > 0 && state.lastSyncCompletedAt == null)));
+        boolean completed = configured && !syncing && state.requestRevision > 0
+                && state.lastSyncCompletedAt != null;
         int stateColor = state.lastError != null ? 0xff8a4300
-                : syncing ? 0xff6750a4 : state.requestRevision > 0 ? 0xff2d9d58 : 0xff625b71;
+                : syncing ? 0xff6750a4 : completed ? 0xff2d9d58 : 0xff625b71;
         UiIcon.Kind stateSymbol = state.lastError != null ? UiIcon.Kind.ERROR
-                : syncing ? UiIcon.Kind.SYNC : state.requestRevision > 0 ? UiIcon.Kind.CHECK : UiIcon.Kind.CLOCK;
+                : syncing ? UiIcon.Kind.SYNC : completed ? UiIcon.Kind.CHECK : UiIcon.Kind.CLOCK;
         statusIcon.setImageDrawable(new UiIcon(stateSymbol, stateColor, dp(16)));
         status.setTextColor(stateColor);
         int badgeBackground = state.lastError != null ? 0xfffff1e5
-                : syncing ? 0xfff2edf7 : state.requestRevision > 0 ? 0xffeaf5ee : 0xfff2edf7;
+                : completed ? 0xffeaf5ee : 0xfff2edf7;
         statusBadge.setBackground(roundedBackground(badgeBackground, badgeBackground));
         statusError.setVisibility(state.lastError == null ? View.GONE : View.VISIBLE);
         statusError.setText(state.lastError == null ? "" : state.lastError
@@ -594,6 +648,20 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void showStateReadError(SQLiteException error) {
+        status.setText("同期を停止しています");
+        status.setTextColor(0xff8a4300);
+        statusIcon.setImageDrawable(new UiIcon(UiIcon.Kind.ERROR, 0xff8a4300, dp(16)));
+        statusBadge.setBackground(roundedBackground(0xfffff1e5, 0xfffff1e5));
+        statusError.setVisibility(View.VISIBLE);
+        statusError.setText("同期状態を読み込めません。\n" + error.getMessage());
+        localSavedValue.setText("読み取り不可");
+        syncCompletedValue.setText("読み取り不可");
+        for (TextView value : new TextView[]{apiVersionValue, generationValue, lastIdValue, databaseIdValue}) {
+            setDetailValue(value, "読み取り不可");
+        }
+    }
+
     private void setDetailValue(TextView view, String value) {
         if (!value.contentEquals(view.getText())) view.setText(value);
     }
@@ -611,7 +679,7 @@ public final class MainActivity extends Activity {
         view.setTextColor(0xff49454f);
         view.setTextIsSelectable(true);
         view.setLineSpacing(dp(3), 1);
-        view.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_SIMPLE);
+        view.setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_SIMPLE);
         return view;
     }
 
@@ -674,14 +742,17 @@ public final class MainActivity extends Activity {
         return rest == 0 ? hours + "時間" : hours + "時間" + rest + "分";
     }
 
-    private String syncProgress(SyncStateStore.State state) {
+    private String syncProgress(SyncStateStore.State state, boolean configured) {
         if (state.lastError != null) return "同期に失敗しました";
         if (state.requestRevision > state.handledRequestRevision) return "ローカル同期中…";
+        if (!configured) return "Nextcloud未設定";
         if (state.dirtyArchiveCount > 0) {
             return "Nextcloudへアップロード中／待機中（"
                     + state.dirtyArchiveCount + "ファイル）";
         }
-        if (state.requestRevision > 0) return "同期完了";
+        if (state.requestRevision > 0) {
+            return state.lastSyncCompletedAt == null ? "同期完了を確認中…" : "同期完了";
+        }
         return "待機中";
     }
 
@@ -826,7 +897,7 @@ public final class MainActivity extends Activity {
         LinearLayout card = card();
         TextView heading = text(title, 16);
         heading.setTypeface(null, Typeface.BOLD);
-        if (Build.VERSION.SDK_INT >= 28) heading.setAccessibilityHeading(true);
+        heading.setAccessibilityHeading(true);
         card.addView(heading);
         return card;
     }
@@ -861,13 +932,13 @@ public final class MainActivity extends Activity {
         return button;
     }
 
-    private EditText labeledField(LinearLayout card, String label, String hint) {
+    private EditText labeledField(LinearLayout card, int id, String label, String hint) {
         TextView name = text(label, 13);
         name.setTextColor(0xff625b71);
         name.setPadding(0, dp(16), 0, dp(6));
         card.addView(name);
         EditText view = new EditText(this);
-        view.setId(View.generateViewId());
+        view.setId(id);
         name.setLabelFor(view.getId());
         view.setHint(hint);
         view.setTextSize(16);

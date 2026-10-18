@@ -4,10 +4,12 @@ import android.app.job.JobInfo;
 import android.app.job.JobScheduler;
 import android.content.ComponentName;
 import android.content.Context;
-import android.os.Build;
+import android.database.sqlite.SQLiteException;
+import android.util.Log;
 
 import com.ajctrl.sumiresync.data.SyncStateStore;
 import com.ajctrl.sumiresync.settings.AppSettings;
+import com.ajctrl.sumiresync.settings.InstallationIdentity;
 import com.ajctrl.sumiresync.upload.UploadJobService;
 
 public final class SyncScheduler {
@@ -23,12 +25,13 @@ public final class SyncScheduler {
         requestCatchUp(context, false);
     }
 
-    public static void requestManualSync(Context context) {
-        requestCatchUp(context, true);
+    public static boolean requestManualSync(Context context) {
+        if (!requestCatchUp(context, true)) return false;
         scheduleUpload(context);
+        return true;
     }
 
-    private static void requestCatchUp(Context context, boolean manual) {
+    private static boolean requestCatchUp(Context context, boolean manual) {
         Context app = context.getApplicationContext();
         try (SyncStateStore states = new SyncStateStore(app)) {
             if (manual) {
@@ -37,12 +40,22 @@ public final class SyncScheduler {
                 states.requestSync();
             }
             try {
-                if (!scheduleCatchUp(app)) states.setError("Catch-up job could not be scheduled");
+                if (!scheduleCatchUp(app)) {
+                    states.setError("Catch-up job could not be scheduled");
+                    return false;
+                }
             } catch (RuntimeException error) {
                 states.setError("Catch-up job could not be scheduled: "
                         + (error.getMessage() == null
                         ? error.getClass().getSimpleName() : error.getMessage()));
+                return false;
             }
+            return true;
+        } catch (SQLiteException error) {
+            // Receivers and activity startup must survive an unreadable state DB.
+            // Do not schedule work whose durable request could not be recorded.
+            Log.e("SumireSync", "Cannot persist sync request; sync stopped", error);
+            return false;
         }
     }
 
@@ -102,6 +115,7 @@ public final class SyncScheduler {
         Context app = context.getApplicationContext();
         try (SyncStateStore states = new SyncStateStore(app)) {
             states.prepareUploadDestination(new AppSettings(app).uploadGeneration());
+            states.prepareUploadNamespace(InstallationIdentity.get(app));
             if (!scheduleUploadSlot(app)) recordUploadScheduleError(app, null);
         } catch (RuntimeException error) {
             recordUploadScheduleError(app, error);
@@ -131,7 +145,10 @@ public final class SyncScheduler {
             // Recover even if the process died after settings were saved but before a job
             // was scheduled. The destination generation is persisted with the settings.
             states.prepareUploadDestination(new AppSettings(context).uploadGeneration());
-            if (!states.dirtyArchives().isEmpty()) scheduleUpload(context);
+            states.prepareUploadNamespace(InstallationIdentity.get(context));
+            if (!states.dirtyArchives().isEmpty() || !states.pendingArchiveWrites().isEmpty()) {
+                scheduleUpload(context);
+            }
         } catch (RuntimeException ignored) {
             // dirty_archives is durable; a later catch-up or boot will try again.
         }
@@ -145,14 +162,14 @@ public final class SyncScheduler {
         if (retry) {
             builder.setMinimumLatency(30_000);
         }
-        if (Build.VERSION.SDK_INT >= 28) builder.setEstimatedNetworkBytes(0, 1024 * 1024);
+        builder.setEstimatedNetworkBytes(0, 1024 * 1024);
         return builder.build();
     }
 
     private static void recordUploadScheduleError(Context context, RuntimeException error) {
         try (SyncStateStore states = new SyncStateStore(context)) {
             String detail = error == null ? "" : ": " + errorDetail(error);
-            states.setError("Upload job could not be scheduled" + detail);
+            states.setUploadError("Upload job could not be scheduled" + detail);
         } catch (RuntimeException ignored) {
             // dirty_archives remains durable even if error reporting also fails.
         }

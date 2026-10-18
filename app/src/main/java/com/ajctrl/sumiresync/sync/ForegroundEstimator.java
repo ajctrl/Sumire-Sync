@@ -5,7 +5,6 @@ import android.app.usage.UsageStatsManager;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
-import android.os.Build;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -29,8 +28,7 @@ public final class ForegroundEstimator {
             UsageEvents events = manager.queryEvents(Math.max(0, earliest - LOOKBACK_MILLIS), latest + 1);
             List<Event> resumes = new ArrayList<>();
             UsageEvents.Event event = new UsageEvents.Event();
-            int wantedType = Build.VERSION.SDK_INT >= 29
-                    ? UsageEvents.Event.ACTIVITY_RESUMED : UsageEvents.Event.MOVE_TO_FOREGROUND;
+            int wantedType = UsageEvents.Event.ACTIVITY_RESUMED;
             while (events.hasNextEvent()) {
                 events.getNextEvent(event);
                 if (event.getEventType() == wantedType && event.getPackageName() != null) {

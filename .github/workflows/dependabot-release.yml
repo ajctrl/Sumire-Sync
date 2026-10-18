@@ -63,7 +63,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6
         with:
           cache-read-only: true
-      - name: Test and build signed release APK
+      - name: Run unit tests without signing credentials
+        run: ./gradlew --no-daemon testDebugUnitTest
+      - name: Build signed release APK
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -79,7 +81,8 @@ jobs:
               exit 1
             fi
           done
-          ./gradlew --no-daemon testDebugUnitTest assembleRelease
+          trap 'rm -f build/signing/release.jks' EXIT
+          ./gradlew --no-daemon assembleRelease
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify app/build/outputs/apk/release/app-release.apk
           mkdir -p artifacts
           cp app/build/outputs/apk/release/app-release.apk "artifacts/Sumire-Sync-v${RELEASE_VERSION}.apk"

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item type="id" name="server_url" />
+    <item type="id" name="server_user" />
+    <item type="id" name="server_password" />
+    <item type="id" name="main_scroll" />
+</resources>

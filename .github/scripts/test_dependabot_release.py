@@ -180,6 +180,65 @@ class ReleaseTests(unittest.TestCase):
                 output.assert_not_called()
                 self.assertFalse(any(call.args[0].endswith("/merge") for call in calls.call_args_list))
 
+    def test_successful_build_merges_exact_head_and_prepares_release_from_merge(self):
+        self.check_open_pr_merge("success")
+
+    def test_merge_api_rejection_does_not_prepare_release(self):
+        self.check_open_pr_merge("rejected")
+
+    def test_main_advancing_immediately_after_merge_stops_release_preparation(self):
+        self.check_open_pr_merge("advanced")
+
+    def check_open_pr_merge(self, outcome):
+        pr = {**PR, "merged_at": None, "mergeable_state": "clean"}
+        main_reads = 0
+        base_api = self.plan_api()
+
+        def pages(path):
+            return [] if "state=closed" in path else [pr]
+
+        def api(path, method="GET", data=None):
+            nonlocal main_reads
+            if path == "commits/main":
+                main_reads += 1
+                main = base_api(path)
+                if main_reads > 1:
+                    main["sha"] = "new-main" if outcome == "advanced" else "merged-sha"
+                    main["commit"]["tree"]["sha"] = "merged-tree"
+                return main
+            if path == "pulls/1":
+                return pr
+            if path.startswith("commits/head/check-runs"):
+                return {"check_runs": [{"name": "Build APK", "conclusion": "success",
+                                         "app": {"slug": "github-actions"}}]}
+            if path == "pulls/1/merge":
+                return {"merged": outcome != "rejected", "sha": "merged-sha"}
+            if path == f"contents/{release.APP}?ref=merged-sha":
+                return base_api(f"contents/{release.APP}?ref=base")
+            return base_api(path, method, data)
+
+        with patch.object(release, "api", side_effect=api) as calls, \
+                patch.object(release, "pages", side_effect=pages), \
+                patch.object(release, "eligible", return_value=True), \
+                patch.object(release, "output") as output:
+            if outcome == "success":
+                release.plan()
+                output.assert_called_once_with(sha="release-sha", base="merged-sha", version="0.9.1")
+                tree = next(c for c in calls.call_args_list if c.args[0] == "git/trees")
+                self.assertEqual(tree.args[2]["base_tree"], "merged-tree")
+                commit = next(c for c in calls.call_args_list if c.args[0] == "git/commits")
+                self.assertEqual(commit.args[2]["parents"], ["merged-sha"])
+            else:
+                message = "could not be merged" if outcome == "rejected" else "main advanced during merge"
+                with self.assertRaisesRegex(RuntimeError, message):
+                    release.plan()
+                output.assert_not_called()
+                self.assertFalse(any(c.args[0] in ("git/trees", "git/commits") for c in calls.call_args_list))
+            merges = [c for c in calls.call_args_list if c.args[0] == "pulls/1/merge"]
+            self.assertEqual(len(merges), 1)
+            self.assertEqual(merges[0].args, ("pulls/1/merge", "PUT", {"sha": "head", "merge_method": "squash"}))
+            self.assertFalse(any("refs/" in c.args[0] for c in calls.call_args_list))
+
     def test_publish_stops_if_main_advanced(self):
         with tempfile.TemporaryDirectory() as directory:
             old_cwd = os.getcwd()

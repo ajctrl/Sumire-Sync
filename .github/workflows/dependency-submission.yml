@@ -13,11 +13,23 @@ jobs:
   dependencies:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Shared across push, dispatch and reusable-workflow callers, including checkout.
+    concurrency:
+      group: sumire-sync-gradle-dependency-submission
+      cancel-in-progress: false
+    env:
+      # The same logical build must replace the same snapshot for push and workflow_call.
+      GITHUB_DEPENDENCY_GRAPH_JOB_CORRELATOR: sumire-sync-gradle
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: main
           persist-credentials: false
+      - name: Identify the checked-out dependency snapshot
+        shell: bash
+        run: |
+          echo "GITHUB_DEPENDENCY_GRAPH_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "GITHUB_DEPENDENCY_GRAPH_REF=refs/heads/main" >> "$GITHUB_ENV"
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
         with:
           distribution: temurin
@@ -26,3 +38,9 @@ jobs:
         with:
           packages: 'platform-tools platforms;android-37.0 build-tools;36.0.0'
       - uses: gradle/actions/dependency-submission@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6
+        with:
+          dependency-graph: generate-and-upload
+      - name: Submit verified dependencies and retire legacy snapshot identities
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/submit_dependencies.py

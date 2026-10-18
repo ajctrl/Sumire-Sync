@@ -33,15 +33,24 @@ public final class NextcloudUrl {
         }
     }
 
-    public static URL archiveUrl(String serverUrl, String username, String fileName)
+    public static URL archiveUrl(String serverUrl, String username, String installationId, String fileName)
             throws IOException {
+        if (installationId == null || !installationId.matches(
+                "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) {
+            throw new IOException("Invalid installation identity");
+        }
+        return new URL(collectionUrl(serverUrl, username).toString()
+                + installationId + "/" + pathSegment(fileName));
+    }
+
+    public static URL collectionUrl(String serverUrl, String username) throws IOException {
         try {
             if (username.trim().isEmpty()) {
                 throw new IllegalArgumentException("Nextcloud username is required");
             }
             String target = serverOrigin(serverUrl)
                     + "/remote.php/dav/files/" + pathSegment(username.trim())
-                    + "/Sumire/" + pathSegment(fileName);
+                    + "/Sumire/";
             return URI.create(target).toURL();
         } catch (IllegalArgumentException error) {
             throw new IOException("Invalid Nextcloud server URL", error);

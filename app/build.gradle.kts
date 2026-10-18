@@ -29,7 +29,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.sumiresync"
-        minSdk = 24
+        minSdk = 30
         targetSdk = 36
         versionCode = 5
         versionName = "0.9.2"
@@ -43,6 +43,10 @@ android {
 
     buildFeatures {
         buildConfig = true
+    }
+
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
     }
 
     compileOptions {

@@ -1,11 +1,11 @@
 package com.ajctrl.sumiresync.sync;
 
 import static org.junit.Assert.*;
+import static com.ajctrl.sumiresync.data.StoragePaths.database;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
-import android.content.pm.ProviderInfo;
 import android.database.Cursor;
 import android.database.DatabaseUtils;
 import android.database.MatrixCursor;
@@ -22,14 +22,13 @@ import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
-import org.robolectric.shadows.ShadowContentResolver;
 
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.nio.file.Files;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(manifest = Config.NONE, sdk = 28)
+@Config(manifest = Config.NONE, sdk = 30)
 public final class SyncEngineTest {
     private static final String AUTHORITY = "com.example.sumire.syncbridge.clipboard";
     private static final long CREATED_AT = 1790899200000L;
@@ -39,18 +38,15 @@ public final class SyncEngineTest {
 
     @Before public void setUp() throws Exception {
         context = RuntimeEnvironment.getApplication();
-        context.deleteDatabase("sync-state.sqlite");
+        android.database.sqlite.SQLiteDatabase.deleteDatabase(database(context, "sync-state.sqlite"));
         try (SyncStateStore states = new SyncStateStore(context)) {
             archiveName = new ArchiveStore(context, states).fileNameFor(CREATED_AT);
         }
-        context.deleteDatabase(archiveName);
+        android.database.sqlite.SQLiteDatabase.deleteDatabase(database(context, archiveName));
         File content = new File(context.getCacheDir(), "provider-content.txt");
         Files.write(content.toPath(), new byte[70 * 1024]);
         provider = new ResettingProvider(content);
-        ProviderInfo info = new ProviderInfo();
-        info.authority = AUTHORITY;
-        provider.attachInfo(context, info);
-        ShadowContentResolver.registerProviderInternal(AUTHORITY, provider);
+        ProviderTestSupport.registerTrusted(context, AUTHORITY, provider);
     }
 
     @Test public void resetWhileOpeningContentRollsBackMetadataAndChunks() {
@@ -65,7 +61,7 @@ public final class SyncEngineTest {
             assertEquals(0, states.dirtyArchiveCount());
         }
         try (SQLiteDatabase archive = SQLiteDatabase.openDatabase(
-                context.getDatabasePath(archiveName).getPath(), null, SQLiteDatabase.OPEN_READONLY)) {
+                database(context, archiveName).getPath(), null, SQLiteDatabase.OPEN_READONLY)) {
             assertEquals(0, DatabaseUtils.queryNumEntries(archive, "clipboard_items"));
             assertEquals(0, DatabaseUtils.queryNumEntries(archive, "clipboard_content_chunks"));
         }
@@ -106,10 +102,34 @@ public final class SyncEngineTest {
         }
     }
 
+    @Test public void nullStreamAfterProviderCrashRetriesWithoutSkippingExistingItem() throws Exception {
+        Uri contentUri = Uri.parse("content://" + AUTHORITY + "/items/1/content");
+        provider.nullOnOpen = true;
+        assertNull(context.getContentResolver().openInputStream(contentUri));
+        try (SyncEngine engine = new SyncEngine(context)) {
+            assertFalse(engine.runBatch(500).success);
+        }
+        try (SyncStateStore states = new SyncStateStore(context)) {
+            assertEquals(0, states.read().lastId);
+            assertEquals(0, DatabaseUtils.queryNumEntries(states.getReadableDatabase(), "gaps"));
+        }
+        provider.nullOnOpen = false;
+        try (SyncEngine engine = new SyncEngine(context)) {
+            SyncEngine.Result recovered = engine.runBatch(500);
+            assertTrue(recovered.error, recovered.success);
+            assertEquals(1, recovered.saved);
+        }
+        try (SyncStateStore states = new SyncStateStore(context)) {
+            assertEquals(1, states.read().lastId);
+            assertEquals(1, states.dirtyArchiveCount());
+        }
+    }
+
     private static final class ResettingProvider extends ContentProvider {
         private final File content;
         boolean resetOnOpen;
         boolean missingOnOpen;
+        boolean nullOnOpen;
         String instance = "old-instance";
 
         ResettingProvider(File content) { this.content = content; }
@@ -133,6 +153,7 @@ public final class SyncEngineTest {
         }
 
         @Override public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
+            if (nullOnOpen) return null;
             if (resetOnOpen) instance = "new-instance";
             if (missingOnOpen) throw new FileNotFoundException("reset during read");
             return ParcelFileDescriptor.open(content, ParcelFileDescriptor.MODE_READ_ONLY);

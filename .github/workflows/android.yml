@@ -38,7 +38,17 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Check release signing secrets
+      - name: Run unit tests without signing credentials
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Build debug APK
+        if: github.ref_type != 'tag'
+        run: |
+          ./gradlew --no-daemon assembleDebug
+          mkdir -p artifacts
+          cp app/build/outputs/apk/debug/app-debug.apk "artifacts/Sumire-Sync-debug-${GITHUB_SHA}.apk"
+
+      - name: Build signed release APK
         if: github.ref_type == 'tag'
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -58,31 +68,12 @@ jobs:
               exit 1
             fi
           done
-
-      - name: Run tests and build APK
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            ./gradlew --no-daemon testDebugUnitTest assembleRelease
-            apk_path="app/build/outputs/apk/release/app-release.apk"
-          else
-            ./gradlew --no-daemon testDebugUnitTest assembleDebug
-            apk_path="app/build/outputs/apk/debug/app-debug.apk"
-          fi
-
+          trap 'rm -f build/signing/release.jks' EXIT
+          ./gradlew --no-daemon assembleRelease
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify app/build/outputs/apk/release/app-release.apk
           mkdir -p artifacts
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            safe_ref_name="${GITHUB_REF_NAME//\//-}"
-            cp "${apk_path}" "artifacts/Sumire-Sync-${safe_ref_name}.apk"
-          else
-            cp "${apk_path}" "artifacts/Sumire-Sync-debug-${GITHUB_SHA}.apk"
-          fi
+          safe_ref_name="${GITHUB_REF_NAME//\//-}"
+          cp app/build/outputs/apk/release/app-release.apk "artifacts/Sumire-Sync-${safe_ref_name}.apk"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v7
