@@ -104,6 +104,14 @@ dependencies {
         add(securityConstraints.name, "org.jdom:jdom2:2.0.6.1") {
             because("Patch XXE in the XML parser used by Android build tools")
         }
+        add(securityConstraints.name, "org.apache.commons:commons-lang3:3.18.0") {
+            because("Patch recursive input handling in separately resolved Android tools")
+        }
+        listOf("bcprov-jdk18on", "bcpkix-jdk18on", "bcutil-jdk18on").forEach { module ->
+            add(securityConstraints.name, "org.bouncycastle:$module:1.86") {
+                because("Keep crypto providers in the separate lint/tool classpaths patched too")
+            }
+        }
         testImplementation("org.bouncycastle:bcprov-jdk18on:1.86") {
             because("Use the patched provider for Robolectric's transitive test dependency")
         }
