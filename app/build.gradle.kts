@@ -31,8 +31,8 @@ android {
         applicationId = "com.example.sumiresync"
         minSdk = 30
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.9.2"
+        versionCode = 6
+        versionName = "1.0.0"
 
         buildConfigField(
             "String",
