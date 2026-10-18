@@ -21,7 +21,7 @@ if (releaseKeystoreBase64.isPresent) {
 
 android {
     namespace = "com.ajctrl.sumiresync"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.example.sumiresync"
