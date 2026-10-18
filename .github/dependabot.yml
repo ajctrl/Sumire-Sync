@@ -9,3 +9,13 @@ updates:
       - dependency-name: "junit:junit"
       - dependency-name: "org.robolectric:robolectric"
       - dependency-name: "org.bouncycastle:bcprov-jdk18on"
+      # Build-tool security constraints require review; the release automation
+      # only auto-merges its existing, narrowly allowed app dependency changes.
+      - dependency-name: "org.bouncycastle:bcpkix-jdk18on"
+      - dependency-name: "org.bouncycastle:bcutil-jdk18on"
+      - dependency-name: "org.jetbrains.kotlin:kotlin-gradle-plugin"
+      - dependency-name: "org.apache.commons:commons-lang3"
+      - dependency-name: "org.apache.httpcomponents:httpclient"
+      - dependency-name: "org.bitbucket.b_c:jose4j"
+      - dependency-name: "org.jdom:jdom2"
+      - dependency-name: "io.netty:*"
