@@ -104,7 +104,7 @@ dependencies {
         add(securityConstraints.name, "org.jdom:jdom2:2.0.6.1") {
             because("Patch XXE in the XML parser used by Android build tools")
         }
-        add(securityConstraints.name, "org.apache.commons:commons-lang3:3.18.0") {
+        add(securityConstraints.name, "org.apache.commons:commons-lang3:3.21.0") {
             because("Patch recursive input handling in separately resolved Android tools")
         }
         listOf("bcprov-jdk18on", "bcpkix-jdk18on", "bcutil-jdk18on").forEach { module ->
