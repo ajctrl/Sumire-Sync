@@ -8,8 +8,8 @@ Dependabot alertsとsecurity updatesをGitHub側で有効にしています。
 main更新時にGradleの依存一覧をGitHubへ送信し、間接依存も監視します。
 `.github/dependabot.yml`でOkHttp・JUnit・Robolectric・Bouncy Castleの更新を平日に毎日確認し、メジャー更新も含めてPRを自動作成します。
 Dependabotが作成したPRのうち、`app/build.gradle.kts`の`implementation`・`testImplementation`の安定版パッチ番号だけを上げる変更を自動処理します。
-加えて、OkHttpの5系内、およびテスト依存のJUnit・Robolectric・Bouncy Castleの同一メジャー内のマイナー更新も自動処理します。Bouncy Castleの`1.86 → 1.87`のような2つの番号で構成されるバージョンにも対応します。
-OkHttpの`4 → 5`・`5 → 6`などのメジャー更新、それ以外のマイナー更新、プレリリース、Gradleプラグイン・GitHub Actionsの変更、手動コミットを含むPRは手動確認が必要です。OkHttpの初回5系移行は、ビルド・テストと実機でのNextcloud同期を確認して取り込みます。
+加えて、OkHttpおよびテスト依存のJUnit・Robolectric・Bouncy Castleは、安定版のマイナー・メジャー更新も自動処理します。特定のメジャー番号には限定せず、テスト・ビルド成功を条件に自動取り込みします。Bouncy Castleの`1.86 → 1.87`やRobolectricの`4.14.1 → 4.17`のように、パッチ番号を省略したバージョンにも対応します。
+それ以外の依存のマイナー・メジャー更新、プレリリース、Gradleプラグイン・GitHub Actionsの変更、手動コミットを含むPRは手動確認が必要です。SDKやビルド設定の変更が必要でチェックに失敗する更新は、自動取り込みされません。
 
 - `main`の必須チェック`Build APK`に成功し、最新のmainに対してマージ可能なPRを自動マージします。
 - `versionCode`を1、`versionName`のパッチ番号を1増やしたコミットを準備し、そのコミットで単体テストと署名付きAPKのビルド・署名検証を行います。

@@ -55,12 +55,15 @@ def eligible_update_line(before, after):
         return False
     previous = tuple(map(int, old['version'].split('.')))
     following = tuple(map(int, new['version'].split('.')))
-    if len(previous) != len(following) or previous[0] != following[0] or following <= previous:
+    # Releases may omit a zero patch: Robolectric 4.14.1 -> 4.17 (= 4.17.0).
+    previous += (0,) * (3 - len(previous))
+    following += (0,) * (3 - len(following))
+    if following <= previous:
         return False
-    if len(previous) == 3 and previous[1] == following[1]:
+    if previous[:2] == following[:2]:
         return True  # Existing patch-update policy for all declared dependencies.
     if old['scope'] == 'implementation' and old['artifact'] == 'com.squareup.okhttp3:okhttp':
-        return len(previous) == 3 and previous[0] == 5
+        return True  # Stable major, minor and patch updates are eligible.
     # Bouncy Castle uses two-part releases, e.g. 1.86 -> 1.87.
     return old['scope'] == 'testImplementation' and old['artifact'] in {
         'junit:junit', 'org.robolectric:robolectric', 'org.bouncycastle:bcprov-jdk18on',

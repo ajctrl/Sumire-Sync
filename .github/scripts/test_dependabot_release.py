@@ -22,37 +22,49 @@ FILE = {"filename": release.APP, "status": "modified", "deletions": 1, "addition
 
 
 class ReleaseTests(unittest.TestCase):
-    def test_minor_update_policy_boundaries(self):
-        cases = [
-            ('implementation', 'com.squareup.okhttp3:okhttp', '5.5.2', '5.6.0', True),
-            ('implementation', 'com.squareup.okhttp3:okhttp', '5.5.2', '5.10.0', True),
-            ('implementation', 'com.squareup.okhttp3:okhttp', '4.12.0', '5.5.0', False),
-            ('implementation', 'com.squareup.okhttp3:okhttp', '5.5.0', '6.0.0', False),
-            ('implementation', 'com.squareup.okhttp3:okhttp', '6.0.0', '6.1.0', False),
-            ('implementation', 'com.squareup.okhttp3:okhttp', '5.6.0', '5.5.9', False),
-            ('implementation', 'com.squareup.okhttp3:okhttp', '5.5.0', '5.6.0-rc1', False),
-            ('implementation', 'org.example:lib', '5.5.0', '5.6.0', False),
-            ('testImplementation', 'junit:junit', '4.13.2', '4.14.0', True),
-            ('testImplementation', 'org.robolectric:robolectric', '4.14.1', '4.15.0', True),
-            ('testImplementation', 'org.bouncycastle:bcprov-jdk18on', '1.86', '1.87', True),
-            ('testImplementation', 'org.bouncycastle:bcprov-jdk18on', '1.86', '2.0', False),
-            ('testImplementation', 'org.bouncycastle:bcprov-jdk18on', '1.86', '1.85', False),
-            ('testImplementation', 'org.bouncycastle:bcprov-jdk18on', '1.86', '1.86', False),
-            ('testImplementation', 'org.bouncycastle:bcprov-jdk18on', '1.86', '1.87-beta', False),
-            ('testImplementation', 'junit:junit', '4.13.2', '5.0.0', False),
-            ('testImplementation', 'org.robolectric:robolectric', '4.14.1', '5.0.0', False),
-            ('testImplementation', 'org.example:lib', '4.1.0', '4.2.0', False),
-            ('implementation', 'junit:junit', '4.13.2', '4.14.0', False),
-        ]
-        for scope, artifact, old, new, expected in cases:
-            with self.subTest(artifact=artifact, old=old, new=new, scope=scope):
-                # Include the constraint-block syntax used by Bouncy Castle.
-                suffix = ' {' if artifact.startswith('org.bouncycastle:') else ''
-                before = f'    {scope}("{artifact}:{old}"){suffix}'
-                after = f'    {scope}("{artifact}:{new}"){suffix}'
-                self.assertEqual(release.eligible_update_line(before, after), expected)
+    @staticmethod
+    def allows_update(before, after, artifact="com.squareup.okhttp3:okhttp",
+                      scope="implementation", suffix=""):
+        return release.eligible_update_line(
+            f'    {scope}("{artifact}:{before}"){suffix}',
+            f'    {scope}("{artifact}:{after}"){suffix}')
 
-    def test_mixed_pr_rejects_major_update_even_with_allowed_minor(self):
+    # These are synthetic inputs for rules, not supported-version lists.
+    def test_all_configured_dependencies_allow_stable_upgrades(self):
+        dependencies = (
+            ("implementation", "com.squareup.okhttp3:okhttp"),
+            ("testImplementation", "junit:junit"),
+            ("testImplementation", "org.robolectric:robolectric"),
+            ("testImplementation", "org.bouncycastle:bcprov-jdk18on"),
+        )
+        for scope, artifact in dependencies:
+            with self.subTest(artifact=artifact):
+                self.assertTrue(self.allows_update("9.9.1", "9.9.2", artifact, scope))  # Patch
+                self.assertTrue(self.allows_update("9.9.1", "9.10.0", artifact, scope))  # Minor
+                self.assertTrue(self.allows_update("9.9.1", "10.0.0", artifact, scope))  # Major
+
+    def test_rejects_unchanged_older_and_nonstable_versions(self):
+        for after in ("9.9.1", "9.8.9", "8.99.99", "10.0.0-rc1", "10.0.+"):
+            with self.subTest(after=after):
+                self.assertFalse(self.allows_update("9.9.1", after))
+
+    def test_omitted_patch_means_zero(self):
+        self.assertTrue(self.allows_update("1.2", "1.2.1"))
+        self.assertFalse(self.allows_update("1.2", "1.2.0"))
+        self.assertFalse(self.allows_update("1.2.1", "1.2"))
+        self.assertTrue(self.allows_update(
+            "1.2", "1.3", "org.bouncycastle:bcprov-jdk18on", "testImplementation", " {"))
+
+    def test_other_dependencies_only_allow_patches(self):
+        for scope, artifact in (("implementation", "org.example:lib"),
+                                ("testImplementation", "org.example:lib"),
+                                ("implementation", "junit:junit")):
+            with self.subTest(scope=scope, artifact=artifact):
+                self.assertTrue(self.allows_update("1.2.3", "1.2.4", artifact, scope))
+                self.assertFalse(self.allows_update("1.2.3", "1.3.0", artifact, scope))
+                self.assertFalse(self.allows_update("1.2.3", "2.2.4", artifact, scope))
+
+    def test_mixed_pr_allows_major_and_minor_but_rejects_unapproved_dependencies(self):
         before = '    implementation("com.squareup.okhttp3:okhttp:5.5.0")'
         after = before.replace('5.5.0', '5.6.0')
         minor_file = {**FILE, 'patch': f'@@ -1 +1 @@\n-{before}\n+{after}'}
@@ -63,18 +75,25 @@ class ReleaseTests(unittest.TestCase):
                       'patch': minor_file['patch'] +
                       '\n-    testImplementation("junit:junit:4.13.2")' +
                       '\n+    testImplementation("junit:junit:5.0.0")'}
+        with patch.object(release, 'pages', side_effect=[
+                [mixed_file], [{'author': {'login': release.BOT}}]]):
+            self.assertTrue(release.eligible(PR))
+        mixed_file['patch'] = mixed_file['patch'].replace('junit:junit:', 'org.example:lib:')
         with patch.object(release, 'pages', return_value=[mixed_file]):
             self.assertFalse(release.eligible(PR))
 
-    def test_only_stable_patch_dependency_changes_are_eligible(self):
-        self.assertTrue(release.eligible_update_line(OLD, NEW))
-        self.assertTrue(release.eligible_update_line(
-            '        testImplementation("org.example:lib:1.2.3") {',
-            '        testImplementation("org.example:lib:1.2.4") {'))
-        for version in ("4.13.0", "5.0.0", "4.12.0", "4.11.9", "4.12.2-rc1", "4.12.+"):
-            self.assertFalse(release.eligible_update_line(OLD, NEW.replace("4.12.1", version)))
+    def test_robolectric_two_part_release_pr_is_eligible(self):
+        before = '    testImplementation("org.robolectric:robolectric:4.14.1")'
+        after = '    testImplementation("org.robolectric:robolectric:4.17")'
+        file = {**FILE, 'patch': f'@@ -68 +68 @@\n-{before}\n+{after}'}
+        with patch.object(release, 'pages', side_effect=[
+                [file], [{'author': {'login': release.BOT}}]]):
+            self.assertTrue(release.eligible(PR))
+
+    def test_rejects_changes_beyond_dependency_version(self):
         self.assertFalse(release.eligible_update_line(OLD, NEW + '; exec { commandLine("evil") }'))
         self.assertFalse(release.eligible_update_line(OLD, NEW.replace("okhttp:", "other:")))
+        self.assertFalse(release.eligible_update_line(OLD, NEW.replace("implementation", "testImplementation")))
         self.assertFalse(release.eligible_update_line('versionName = "1.0.0"', 'versionName = "1.0.1"'))
 
     def test_rejects_forks_human_commits_and_incomplete_diffs(self):
