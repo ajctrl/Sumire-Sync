@@ -5,6 +5,10 @@ import android.app.AlertDialog;
 import android.app.AppOpsManager;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -12,10 +16,17 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
-import android.text.TextUtils;
+import android.content.res.ColorStateList;
+import android.graphics.drawable.StateListDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.widget.ImageView;
+import android.view.inputmethod.InputMethodManager;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.ImageSpan;
+import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -34,6 +45,9 @@ import com.ajctrl.sumiresync.upload.NextcloudUrl;
 
 import java.text.DateFormat;
 import java.util.Date;
+import java.util.Calendar;
+import java.util.ArrayList;
+import java.util.List;
 
 public final class MainActivity extends Activity {
     private static final long STATUS_REFRESH_MILLIS = 1_500;
@@ -51,13 +65,31 @@ public final class MainActivity extends Activity {
     private EditText url;
     private EditText user;
     private EditText password;
-    private CheckBox foreground;
+    private Switch foreground;
     private Switch flagging;
     private Spinner flagDuration;
     private TextView flagRemaining;
     private boolean updatingFlagUi;
-    private TextView source;
     private TextView status;
+    private TextView statusError;
+    private TextView connectionValue;
+    private TextView localSavedValue;
+    private TextView syncCompletedValue;
+    private TextView usageAccessValue;
+    private LinearLayout statusDetails;
+    private TextView apiVersionValue;
+    private TextView databaseIdValue;
+    private TextView generationValue;
+    private TextView lastIdValue;
+    private TextView providerUrisLabel;
+    private LinearLayout providerUris;
+    private List<String> displayedProviderUris = new ArrayList<>();
+    private Button detailsToggle;
+    private ImageView statusIcon;
+    private LinearLayout statusBadge;
+    private Disclosure connectionSection;
+    private Disclosure optionsSection;
+    private boolean detailsExpanded;
     private Handler statusHandler;
     private final Runnable statusRefresh = new Runnable() {
         @Override public void run() {
@@ -69,8 +101,13 @@ public final class MainActivity extends Activity {
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         statusHandler = new Handler(Looper.getMainLooper());
+        detailsExpanded = state != null && state.getBoolean("detailsExpanded");
         setContentView(buildContent());
         loadSettings();
+        if (state != null) {
+            connectionSection.setExpanded(state.getBoolean("connectionExpanded"));
+            optionsSection.setExpanded(state.getBoolean("optionsExpanded"));
+        }
         SyncScheduler.requestCatchUp(this);
         SyncScheduler.schedulePeriodicCatchUp(this);
     }
@@ -86,48 +123,117 @@ public final class MainActivity extends Activity {
         super.onPause();
     }
 
+    @Override protected void onSaveInstanceState(Bundle state) {
+        state.putBoolean("detailsExpanded", detailsExpanded);
+        state.putBoolean("connectionExpanded", connectionSection.expanded);
+        state.putBoolean("optionsExpanded", optionsSection.expanded);
+        super.onSaveInstanceState(state);
+    }
+
     private View buildContent() {
-        int pad = dp(20);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(pad, pad, pad, pad);
+        root.setPadding(dp(16), dp(24), dp(16), dp(16));
+        root.setBackgroundColor(0xfff7f2fa);
+        root.setFocusableInTouchMode(true);
 
         TextView title = text("Sumire Sync", 28);
+        title.setTypeface(null, Typeface.BOLD);
         root.addView(title);
-        source = text(sourceLabel(new AppSettings(this).connectedProviderAuthority()), 13);
-        source.setPadding(0, dp(4), 0, dp(20));
-        root.addView(source);
+        TextView subtitle = text("クリップボードをNextcloudへ同期", 14);
+        subtitle.setTextColor(0xff625b71);
+        subtitle.setPadding(0, dp(4), 0, dp(8));
+        root.addView(subtitle);
+        addSection(root, buildStatusCard());
 
-        url = field("NextcloudサーバーURL (例: https://url.com:8443)");
-        root.addView(url);
-        user = field("ユーザー名");
-        root.addView(user);
-        password = field("パスワード / アプリパスワード");
+        addSection(root, buildFlagCard());
+
+        connectionSection = new Disclosure("接続設定", UiIcon.Kind.CLOUD);
+        LinearLayout connection = connectionSection.body;
+        url = labeledField(connection, "NextcloudサーバーURL", "https://cloud.example.com");
+        url.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        user = labeledField(connection, "ユーザー名", "ユーザー名を入力");
+        password = labeledField(connection, "パスワード / アプリパスワード", "パスワードを入力");
         password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        root.addView(password);
+        Button save = actionButton("設定を保存して同期", true);
+        save.setOnClickListener(v -> saveAndSync());
+        LinearLayout.LayoutParams saveParams = fullWidth();
+        saveParams.topMargin = dp(16);
+        connection.addView(save, saveParams);
+        addSection(root, connectionSection.card);
 
-        foreground = new CheckBox(this);
-        foreground.setText(R.string.foreground_inference);
-        root.addView(foreground);
+        optionsSection = new Disclosure("同期オプション", UiIcon.Kind.SLIDERS);
+        LinearLayout options = optionsSection.body;
+        foreground = new Switch(this);
+        foreground.setText("コピー元のアプリを推定する");
+        foreground.setTextColor(0xff1d1b20);
+        foreground.setTextSize(15);
+        foreground.setMinHeight(dp(48));
+        foreground.setSwitchPadding(dp(12));
+        options.addView(foreground, fullWidth());
+        TextView foregroundHelp = text("コピー時に開いていたアプリを推定します。\n利用には使用状況へのアクセス許可が必要です。", 13);
+        foregroundHelp.setTextColor(0xff625b71);
+        foregroundHelp.setLineSpacing(dp(3), 1);
+        foregroundHelp.setPadding(0, dp(4), 0, dp(4));
+        options.addView(foregroundHelp, fullWidth());
+        addDivider(options);
 
-        Button usageAccess = new Button(this);
-        usageAccess.setText("使用状況へのアクセスを設定");
+        LinearLayout permissionRow = new LinearLayout(this);
+        boolean stackedPermission = getResources().getConfiguration().screenWidthDp < 360
+                || getResources().getConfiguration().fontScale > 1.2f;
+        permissionRow.setOrientation(stackedPermission ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        permissionRow.setGravity(Gravity.CENTER_VERTICAL);
+        permissionRow.setPadding(0, dp(16), 0, 0);
+        TextView permissionLabel = text("使用状況へのアクセス", 14);
+        permissionRow.addView(permissionLabel, stackedPermission ? fullWidth()
+                : new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        usageAccessValue = text("", 12);
+        usageAccessValue.setPadding(dp(10), dp(5), dp(10), dp(5));
+        LinearLayout.LayoutParams permissionStateParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        if (stackedPermission) permissionStateParams.topMargin = dp(8);
+        else permissionStateParams.setMarginStart(dp(12));
+        permissionRow.addView(usageAccessValue, permissionStateParams);
+        options.addView(permissionRow, fullWidth());
+        Button usageAccess = actionButton("アクセス許可を設定", false);
         usageAccess.setOnClickListener(v -> showUsageAccessHelp());
-        root.addView(usageAccess);
+        LinearLayout.LayoutParams permissionButtonParams = fullWidth();
+        permissionButtonParams.topMargin = dp(12);
+        options.addView(usageAccess, permissionButtonParams);
+        addSection(root, optionsSection.card);
 
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(0xfff7f2fa);
+        scroll.addView(root);
+        root.requestFocus();
+        return scroll;
+    }
+
+    private View buildFlagCard() {
+        LinearLayout card = card();
         flagging = new Switch(this);
         flagging.setText(R.string.flag_toggle);
-        flagging.setPadding(0, dp(12), 0, 0);
+        flagging.setTextColor(0xff1d1b20);
+        flagging.setTextSize(18);
+        flagging.setCompoundDrawablesRelativeWithIntrinsicBounds(
+                new UiIcon(UiIcon.Kind.FLAG, 0xff6750a4, dp(28)), null, null, null);
+        flagging.setCompoundDrawablePadding(dp(12));
+        flagging.setSwitchPadding(dp(12));
+        flagging.setTypeface(null, Typeface.BOLD);
+        flagging.setMinHeight(dp(48));
+        flagging.setPadding(0, dp(8), 0, 0);
         flagging.setOnCheckedChangeListener((button, checked) -> {
             if (updatingFlagUi) return;
             new AppSettings(this).setFlaggingEnabled(checked);
             refreshFlagUi();
         });
-        root.addView(flagging);
+        card.addView(flagging);
 
-        TextView flagDescription = text(getString(R.string.flag_description), 13);
+        TextView flagDescription = text("同期した項目にフラグを付ける", 13);
         flagDescription.setPadding(0, dp(2), 0, dp(4));
-        root.addView(flagDescription);
+        flagDescription.setTextColor(0xff625b71);
+        card.addView(flagDescription);
 
         LinearLayout durationRow = new LinearLayout(this);
         durationRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -152,35 +258,235 @@ public final class MainActivity extends Activity {
 
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
         });
-        durationRow.addView(flagDuration);
-        root.addView(durationRow);
+        LinearLayout durationSelector = new LinearLayout(this);
+        durationSelector.setGravity(Gravity.CENTER_VERTICAL);
+        durationSelector.setPadding(dp(4), 0, dp(10), 0);
+        durationSelector.setBackground(roundedBackground(0xfff7f2fa, 0xfff7f2fa));
+        flagDuration.setBackground(null);
+        flagDuration.setMinimumHeight(dp(48));
+        durationSelector.addView(flagDuration);
+        ImageView durationArrow = new ImageView(this);
+        durationArrow.setImageDrawable(new UiIcon(UiIcon.Kind.DOWN, 0xff625b71, dp(18)));
+        durationArrow.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        durationSelector.addView(durationArrow, new LinearLayout.LayoutParams(dp(18), dp(18)));
+        durationSelector.setOnClickListener(v -> flagDuration.performClick());
+        durationRow.addView(durationSelector);
+        durationRow.setMinimumHeight(dp(48));
+        LinearLayout.LayoutParams durationParams = fullWidth();
+        durationParams.topMargin = dp(16);
+        card.addView(durationRow, durationParams);
 
         flagRemaining = text("", 13);
         flagRemaining.setPadding(0, 0, 0, dp(8));
-        root.addView(flagRemaining);
+        flagRemaining.setTextColor(0xff6750a4);
+        card.addView(flagRemaining);
+        return card;
+    }
 
-        Button save = new Button(this);
-        save.setText("設定を保存して同期");
-        save.setOnClickListener(v -> saveAndSync());
-        root.addView(save);
+    private View buildStatusCard() {
+        LinearLayout card = card();
+        boolean stacked = useStackedStatusLayout();
+        LinearLayout headline = new LinearLayout(this);
+        headline.setOrientation(stacked ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        headline.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = text("同期状況", 18);
+        title.setTypeface(null, Typeface.BOLD);
+        title.setCompoundDrawablesRelativeWithIntrinsicBounds(
+                new UiIcon(UiIcon.Kind.SYNC, 0xff6750a4, dp(28)), null, null, null);
+        title.setCompoundDrawablePadding(dp(12));
+        if (Build.VERSION.SDK_INT >= 28) title.setAccessibilityHeading(true);
+        headline.addView(title, stacked ? fullWidth() : new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        statusBadge = new LinearLayout(this);
+        statusBadge.setGravity(Gravity.CENTER_VERTICAL);
+        statusBadge.setPadding(dp(8), dp(6), dp(10), dp(6));
+        statusIcon = new ImageView(this);
+        statusIcon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(16), dp(16));
+        iconParams.setMarginEnd(dp(6));
+        statusBadge.addView(statusIcon, iconParams);
+        status = text("", 12);
+        status.setMaxWidth(dp(128));
+        status.setTypeface(null, Typeface.BOLD);
+        statusBadge.addView(status);
+        LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        if (stacked) badgeParams.topMargin = dp(12);
+        else badgeParams.setMarginStart(dp(12));
+        headline.addView(statusBadge, badgeParams);
+        card.addView(headline, fullWidth());
 
-        Button sync = new Button(this);
-        sync.setText(R.string.sync_now);
+        statusError = text("", 14);
+        statusError.setTextColor(0xff8a4300);
+        statusError.setPadding(0, dp(8), 0, dp(4));
+        statusError.setTextIsSelectable(true);
+        statusError.setVisibility(View.GONE);
+        card.addView(statusError);
+
+        LinearLayout information = new LinearLayout(this);
+        information.setOrientation(stacked ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        information.setGravity(Gravity.TOP);
+        LinearLayout connection = new LinearLayout(this);
+        connection.setOrientation(LinearLayout.VERTICAL);
+        connectionValue = addSummaryValue(connection, "接続先");
+        connectionValue.setTextSize(16);
+        information.addView(connection, stacked ? fullWidth() : new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        View separator = new View(this);
+        separator.setBackgroundColor(0xffe7e0ec);
+        LinearLayout.LayoutParams separatorParams = new LinearLayout.LayoutParams(
+                stacked ? LinearLayout.LayoutParams.MATCH_PARENT : dp(1),
+                stacked ? dp(1) : LinearLayout.LayoutParams.MATCH_PARENT);
+        if (stacked) {
+            separatorParams.topMargin = dp(16);
+            separatorParams.bottomMargin = dp(16);
+        } else {
+            separatorParams.setMarginStart(dp(12));
+            separatorParams.setMarginEnd(dp(16));
+        }
+        information.addView(separator, separatorParams);
+        LinearLayout times = new LinearLayout(this);
+        times.setOrientation(LinearLayout.VERTICAL);
+        syncCompletedValue = addSummaryValue(times, "最終同期");
+        syncCompletedValue.setTextSize(28);
+        syncCompletedValue.setTypeface(null, Typeface.BOLD);
+        LinearLayout localTime = new LinearLayout(this);
+        localTime.setOrientation(LinearLayout.VERTICAL);
+        localSavedValue = addSummaryValue(localTime, "最終ローカル保存");
+        localSavedValue.setTextSize(14);
+        localSavedValue.setTextColor(0xff625b71);
+        LinearLayout.LayoutParams localTimeParams = fullWidth();
+        localTimeParams.topMargin = dp(16);
+        times.addView(localTime, localTimeParams);
+        information.addView(times, stacked ? fullWidth() : new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.6f));
+        LinearLayout.LayoutParams informationParams = fullWidth();
+        informationParams.topMargin = dp(24);
+        informationParams.bottomMargin = dp(8);
+        card.addView(information, informationParams);
+        addDivider(card);
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(stacked ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        actions.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams actionsParams = fullWidth();
+        actionsParams.topMargin = dp(12);
+        card.addView(actions, actionsParams);
+        Button sync = actionButton("今すぐ同期", true);
+        UiIcon syncIcon = new UiIcon(UiIcon.Kind.SYNC, 0xffffffff, dp(20));
+        syncIcon.setBounds(0, 0, dp(20), dp(20));
+        SpannableString syncLabel = new SpannableString("  今すぐ同期");
+        syncLabel.setSpan(new ImageSpan(syncIcon, ImageSpan.ALIGN_BASELINE), 0, 1,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        sync.setText(syncLabel);
+        sync.setContentDescription("今すぐ同期");
         sync.setOnClickListener(v -> {
             SyncScheduler.requestManualSync(this);
             Toast.makeText(this, "同期を開始しました", Toast.LENGTH_SHORT).show();
             refreshStatus();
         });
-        root.addView(sync);
+        detailsToggle = new Button(this, null, android.R.attr.borderlessButtonStyle);
+        detailsToggle.setTextColor(0xff6750a4);
+        detailsToggle.setTextSize(14);
+        detailsToggle.setGravity(android.view.Gravity.START | android.view.Gravity.CENTER_VERTICAL);
+        detailsToggle.setPadding(0, 0, 0, 0);
+        detailsToggle.setMinHeight(dp(48));
+        detailsToggle.setMinimumHeight(dp(48));
+        detailsToggle.setAllCaps(false);
+        detailsToggle.setOnClickListener(v -> {
+            detailsExpanded = !detailsExpanded;
+            updateDetailsVisibility();
+        });
+        detailsToggle.setMinWidth(0);
+        detailsToggle.setMinimumWidth(0);
+        actions.addView(detailsToggle, stacked ? fullWidth() : new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams syncParams = stacked ? fullWidth() : new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.25f);
+        if (stacked) syncParams.topMargin = dp(8);
+        else syncParams.setMarginStart(dp(16));
+        actions.addView(sync, syncParams);
+        statusDetails = new LinearLayout(this);
+        statusDetails.setOrientation(LinearLayout.VERTICAL);
+        statusDetails.setPadding(dp(14), dp(2), dp(14), dp(16));
+        statusDetails.setBackground(roundedBackground(0xfff7f5fa, 0xfff7f5fa));
+        apiVersionValue = addStatusValue(statusDetails, "Provider API");
+        generationValue = addStatusValue(statusDetails, "クリップボード世代");
+        lastIdValue = addStatusValue(statusDetails, "最終取得ID");
+        addDivider(statusDetails);
+        TextView databaseLabel = detailLabel("データベースID");
+        statusDetails.addView(databaseLabel, fullWidth());
+        databaseIdValue = technicalValue("");
+        statusDetails.addView(databaseIdValue, fullWidth());
+        providerUrisLabel = detailLabel("");
+        statusDetails.addView(providerUrisLabel, fullWidth());
+        providerUris = new LinearLayout(this);
+        providerUris.setOrientation(LinearLayout.VERTICAL);
+        statusDetails.addView(providerUris, fullWidth());
+        LinearLayout.LayoutParams detailParams = fullWidth();
+        detailParams.topMargin = dp(12);
+        detailParams.bottomMargin = dp(4);
+        card.addView(statusDetails, detailParams);
+        updateDetailsVisibility();
+        return card;
+    }
 
-        status = text("", 14);
-        status.setPadding(0, dp(20), 0, 0);
-        status.setTextIsSelectable(true);
-        root.addView(status);
+    private boolean useStackedStatusLayout() {
+        return getResources().getConfiguration().screenWidthDp < 360
+                || getResources().getConfiguration().fontScale > 1.2f;
+    }
 
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(root);
-        return scroll;
+    private TextView addSummaryValue(LinearLayout column, String label) {
+        TextView name = text(label, 13);
+        name.setTextColor(0xff625b71);
+        column.addView(name, fullWidth());
+        TextView value = text("—", 18);
+        value.setTextIsSelectable(true);
+        value.setPadding(0, dp(6), 0, 0);
+        column.addView(value, fullWidth());
+        return value;
+    }
+
+    private TextView addStatusValue(LinearLayout card, String label) {
+        LinearLayout row = new LinearLayout(this);
+        boolean stacked = getResources().getConfiguration().screenWidthDp < 360
+                || getResources().getConfiguration().fontScale > 1.2f;
+        row.setOrientation(stacked ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.TOP);
+        row.setPadding(0, dp(12), 0, 0);
+        TextView name = text(label, 13);
+        name.setTextColor(0xff625b71);
+        row.addView(name, stacked ? fullWidth() : new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        TextView value = text("—", 14);
+        value.setGravity(Gravity.START);
+        if (stacked) value.setPadding(0, dp(4), 0, 0);
+        value.setTextIsSelectable(true);
+        row.addView(value, stacked ? fullWidth() : new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f));
+        card.addView(row, fullWidth());
+        return value;
+    }
+
+    private void updateDetailsVisibility() {
+        UiIcon chevron = new UiIcon(detailsExpanded ? UiIcon.Kind.DOWN : UiIcon.Kind.RIGHT,
+                0xff625b71, dp(16));
+        chevron.setBounds(0, 0, dp(16), dp(16));
+        SpannableString label = new SpannableString("詳細情報  \uFFFC");
+        label.setSpan(new ImageSpan(chevron) {
+            @Override public void draw(Canvas canvas, CharSequence text, int start, int end,
+                                       float x, int top, int y, int bottom, Paint paint) {
+                // Align to the text's vertical center, independent of font size or line padding.
+                float centerY = y + (paint.ascent() + paint.descent()) / 2f;
+                int saved = canvas.save();
+                canvas.translate(x, centerY - chevron.getBounds().height() / 2f);
+                chevron.draw(canvas);
+                canvas.restoreToCount(saved);
+            }
+        }, label.length() - 1,
+                label.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        detailsToggle.setText(label);
+        detailsToggle.setContentDescription(detailsExpanded ? "詳細情報を閉じる" : "詳細情報を開く");
+        statusDetails.setVisibility(detailsExpanded ? View.VISIBLE : View.GONE);
     }
 
     private void loadSettings() {
@@ -188,6 +494,11 @@ public final class MainActivity extends Activity {
         url.setText(settings.webDavUrl());
         user.setText(settings.webDavUser());
         foreground.setChecked(settings.foregroundInferenceEnabled());
+        foreground.setOnCheckedChangeListener((button, checked) -> {
+            new AppSettings(this).setForegroundInferenceEnabled(checked);
+            refreshSettingsSummaries();
+        });
+        refreshSettingsSummaries();
         refreshFlagUi();
         try {
             password.setText(new SecretStore(this).getPassword());
@@ -215,6 +526,8 @@ public final class MainActivity extends Activity {
             new AppSettings(this).save(value, username, foreground.isChecked(),
                     password.getText().toString());
             url.setText(value);
+            connectionSection.setExpanded(false);
+            refreshSettingsSummaries();
             SyncScheduler.requestManualSync(this);
             Toast.makeText(this, "設定を保存して同期を開始しました", Toast.LENGTH_SHORT).show();
             refreshStatus();
@@ -231,29 +544,99 @@ public final class MainActivity extends Activity {
         }
         AppSettings settings = new AppSettings(this);
         String connectedAuthority = settings.connectedProviderAuthority();
-        source.setText(sourceLabel(connectedAuthority));
-        StringBuilder value = new StringBuilder();
-        value.append("同期状況: ").append(syncProgress(state)).append('\n');
-        value.append("Provider API: ").append(state.apiVersion == null ? "未接続" : state.apiVersion).append('\n');
-        value.append("databaseInstanceId: ").append(state.instanceId == null ? "—" : state.instanceId).append('\n');
-        value.append("clipboardGeneration: ").append(state.generation == null ? "—" : state.generation).append('\n');
-        value.append("lastId: ").append(state.lastId).append('\n');
-        value.append("最終ローカル保存: ").append(state.lastSyncAt == null ? "—" :
-                DateFormat.getDateTimeInstance().format(new Date(state.lastSyncAt))).append('\n');
-        value.append("最終同期完了: ").append(state.lastSyncCompletedAt == null ? "—" :
-                DateFormat.getDateTimeInstance().format(new Date(state.lastSyncCompletedAt))).append('\n');
-        value.append("Usage Access: ").append(hasUsageAccess() ? "許可" : "未許可").append('\n');
-        if (state.lastError != null) value.append("エラー: ").append(state.lastError).append('\n');
+        status.setText(syncProgress(state));
+        boolean syncing = state.requestRevision > state.handledRequestRevision
+                || state.dirtyArchiveCount > 0;
+        int stateColor = state.lastError != null ? 0xff8a4300
+                : syncing ? 0xff6750a4 : state.requestRevision > 0 ? 0xff2d9d58 : 0xff625b71;
+        UiIcon.Kind stateSymbol = state.lastError != null ? UiIcon.Kind.ERROR
+                : syncing ? UiIcon.Kind.SYNC : state.requestRevision > 0 ? UiIcon.Kind.CHECK : UiIcon.Kind.CLOCK;
+        statusIcon.setImageDrawable(new UiIcon(stateSymbol, stateColor, dp(16)));
+        status.setTextColor(stateColor);
+        int badgeBackground = state.lastError != null ? 0xfffff1e5
+                : syncing ? 0xfff2edf7 : state.requestRevision > 0 ? 0xffeaf5ee : 0xfff2edf7;
+        statusBadge.setBackground(roundedBackground(badgeBackground, badgeBackground));
+        statusError.setVisibility(state.lastError == null ? View.GONE : View.VISIBLE);
+        statusError.setText(state.lastError == null ? "" : state.lastError
+                + "\n\n接続先や設定を確認し、「今すぐ同期」で再試行してください。");
+        connectionValue.setText(connectedAuthority == null ? "未接続"
+                : providerName(connectedAuthority));
+        localSavedValue.setText(formatStatusTime(state.lastSyncAt));
+        syncCompletedValue.setText(formatStatusTime(state.lastSyncCompletedAt));
+        boolean usageAllowed = hasUsageAccess();
+        usageAccessValue.setText(usageAllowed ? "許可済み" : "未許可");
+        usageAccessValue.setTextColor(usageAllowed ? 0xff246b45 : 0xff8a4300);
+        int permissionBackground = usageAllowed ? 0xffeaf5ee : 0xfffff1e5;
+        usageAccessValue.setBackground(roundedBackground(permissionBackground, permissionBackground));
+        setDetailValue(apiVersionValue, state.apiVersion == null ? "未接続" : state.apiVersion.toString());
+        setDetailValue(generationValue, state.generation == null ? "—" : state.generation.toString());
+        setDetailValue(lastIdValue, Long.toString(state.lastId));
+        setDetailValue(databaseIdValue, state.instanceId == null ? "—" : state.instanceId);
+        setDetailValue(providerUrisLabel, connectedAuthority == null ? "接続先候補のURI" : "接続先のURI");
+        List<String> uris = new ArrayList<>();
         if (connectedAuthority == null) {
-            value.append("Provider URI候補:\n");
             for (String authority : SumireContract.authorityCandidates(null)) {
-                value.append("  ").append(SumireContract.statusUri(authority)).append('\n');
+                uris.add(SumireContract.statusUri(authority).toString());
             }
         } else {
-            value.append("接続済みProvider URI: ")
-                    .append(SumireContract.statusUri(connectedAuthority));
+            uris.add(SumireContract.statusUri(connectedAuthority).toString());
         }
-        status.setText(value.toString());
+        // Keep selectable text views intact while the status refreshes in the background.
+        if (!uris.equals(displayedProviderUris)) {
+            providerUris.removeAllViews();
+            for (String uri : uris) {
+                TextView value = technicalValue(uri);
+                LinearLayout.LayoutParams params = fullWidth();
+                if (providerUris.getChildCount() > 0) params.topMargin = dp(12);
+                providerUris.addView(value, params);
+            }
+            displayedProviderUris = uris;
+        }
+    }
+
+    private void setDetailValue(TextView view, String value) {
+        if (!value.contentEquals(view.getText())) view.setText(value);
+    }
+
+    private TextView detailLabel(String label) {
+        TextView view = text(label, 12);
+        view.setTextColor(0xff625b71);
+        view.setPadding(0, dp(16), 0, dp(6));
+        return view;
+    }
+
+    private TextView technicalValue(String value) {
+        TextView view = text(value, 13);
+        view.setTypeface(Typeface.MONOSPACE);
+        view.setTextColor(0xff49454f);
+        view.setTextIsSelectable(true);
+        view.setLineSpacing(dp(3), 1);
+        view.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_SIMPLE);
+        return view;
+    }
+
+    private String formatStatusTime(Long timestamp) {
+        if (timestamp == null) return "—";
+        Calendar date = Calendar.getInstance();
+        date.setTimeInMillis(timestamp);
+        Calendar today = Calendar.getInstance();
+        if (date.get(Calendar.ERA) == today.get(Calendar.ERA)
+                && date.get(Calendar.YEAR) == today.get(Calendar.YEAR)
+                && date.get(Calendar.DAY_OF_YEAR) == today.get(Calendar.DAY_OF_YEAR)) {
+            return "今日 " + android.text.format.DateFormat.getTimeFormat(this).format(new Date(timestamp));
+        }
+        return DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
+                .format(new Date(timestamp));
+    }
+
+    private String providerName(String authority) {
+        String packageId = SumireContract.packageIdForAuthority(authority);
+        try {
+            return getPackageManager().getApplicationLabel(
+                    getPackageManager().getApplicationInfo(packageId, 0)).toString();
+        } catch (android.content.pm.PackageManager.NameNotFoundException error) {
+            return packageId;
+        }
     }
 
     private void refreshFlagUi() {
@@ -291,15 +674,8 @@ public final class MainActivity extends Activity {
         return rest == 0 ? hours + "時間" : hours + "時間" + rest + "分";
     }
 
-    private String sourceLabel(String connectedAuthority) {
-        if (connectedAuthority != null && !connectedAuthority.trim().isEmpty()) {
-            return "接続先: " + SumireContract.packageIdForAuthority(connectedAuthority);
-        }
-        return "接続先候補: " + TextUtils.join(", ", SumireContract.packageIdCandidates());
-    }
-
     private String syncProgress(SyncStateStore.State state) {
-        if (state.lastError != null) return "失敗（下のエラー詳細を確認してください）";
+        if (state.lastError != null) return "同期に失敗しました";
         if (state.requestRevision > state.handledRequestRevision) return "ローカル同期中…";
         if (state.dirtyArchiveCount > 0) {
             return "Nextcloudへアップロード中／待機中（"
@@ -349,11 +725,163 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private EditText field(String hint) {
+    private void refreshSettingsSummaries() {
+        AppSettings settings = new AppSettings(this);
+        boolean configured = !settings.webDavUrl().isEmpty() && !settings.webDavUser().isEmpty();
+        connectionSection.setSummary(configured ? "Nextcloud・設定済み" : "Nextcloud・未設定");
+        optionsSection.setSummary("コピー元アプリの推定："
+                + (settings.foregroundInferenceEnabled() ? "ON" : "OFF"));
+    }
+
+    private final class Disclosure {
+        final LinearLayout card = card();
+        final LinearLayout body = new LinearLayout(MainActivity.this);
+        final LinearLayout header = new LinearLayout(MainActivity.this) {
+            @Override public CharSequence getAccessibilityClassName() { return Button.class.getName(); }
+        };
+        final TextView summary = text("", 13);
+        final ImageView chevron = new ImageView(MainActivity.this);
+        final String title;
+        boolean expanded;
+
+        Disclosure(String title, UiIcon.Kind icon) {
+            this.title = title;
+            header.setGravity(Gravity.CENTER_VERTICAL);
+            header.setMinimumHeight(dp(48));
+            header.setFocusable(true);
+            header.setBackground(new RippleDrawable(ColorStateList.valueOf(0x226750a4), null,
+                    roundedBackground(0xffffffff, 0xffffffff)));
+            ImageView leading = new ImageView(MainActivity.this);
+            leading.setImageDrawable(new UiIcon(icon, 0xff6750a4, dp(28)));
+            header.addView(leading, new LinearLayout.LayoutParams(dp(28), dp(28)));
+            LinearLayout labels = new LinearLayout(MainActivity.this);
+            labels.setOrientation(LinearLayout.VERTICAL);
+            labels.setPadding(dp(16), 0, dp(8), 0);
+            TextView name = text(title, 16);
+            name.setTypeface(null, Typeface.BOLD);
+            labels.addView(name);
+            summary.setTextColor(0xff625b71);
+            summary.setPadding(0, dp(4), 0, 0);
+            labels.addView(summary);
+            header.addView(labels, new LinearLayout.LayoutParams(0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+            header.addView(chevron, new LinearLayout.LayoutParams(dp(20), dp(20)));
+            leading.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            labels.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            chevron.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            header.setOnClickListener(v -> setExpanded(!expanded));
+            card.addView(header, fullWidth());
+            body.setOrientation(LinearLayout.VERTICAL);
+            body.setPadding(0, dp(12), 0, 0);
+            card.addView(body, fullWidth());
+            setExpanded(false);
+        }
+
+        void setSummary(String value) {
+            summary.setText(value);
+            updateDescription();
+        }
+
+        void setExpanded(boolean value) {
+            expanded = value;
+            if (!value && body.hasFocus()) {
+                InputMethodManager keyboard = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                keyboard.hideSoftInputFromWindow(body.getWindowToken(), 0);
+                header.requestFocus();
+            }
+            body.setVisibility(value ? View.VISIBLE : View.GONE);
+            chevron.setImageDrawable(new UiIcon(value ? UiIcon.Kind.DOWN : UiIcon.Kind.RIGHT,
+                    0xff625b71, dp(20)));
+            updateDescription();
+        }
+
+        private void updateDescription() {
+            header.setContentDescription(title + "、" + summary.getText()
+                    + (expanded ? "、閉じる" : "、開く"));
+        }
+    }
+
+    private LinearLayout.LayoutParams fullWidth() {
+        return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+    }
+
+    private GradientDrawable roundedBackground(int color, int border) {
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(color);
+        background.setCornerRadius(dp(12));
+        background.setStroke(dp(1), border);
+        return background;
+    }
+
+    private LinearLayout card() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setBackground(roundedBackground(0xffffffff, 0xfff0eaf5));
+        return card;
+    }
+
+    private LinearLayout section(String title) {
+        LinearLayout card = card();
+        TextView heading = text(title, 16);
+        heading.setTypeface(null, Typeface.BOLD);
+        if (Build.VERSION.SDK_INT >= 28) heading.setAccessibilityHeading(true);
+        card.addView(heading);
+        return card;
+    }
+
+    private void addSection(LinearLayout root, View section) {
+        LinearLayout.LayoutParams params = fullWidth();
+        params.topMargin = dp(16);
+        root.addView(section, params);
+    }
+
+    private void addDivider(LinearLayout card) {
+        View divider = new View(this);
+        divider.setBackgroundColor(0xffe7e0ec);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(1));
+        params.topMargin = dp(12);
+        card.addView(divider, params);
+    }
+
+    private Button actionButton(String label, boolean primary) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setAllCaps(false);
+        button.setTextSize(14);
+        button.setMinHeight(dp(52));
+        button.setMinimumHeight(dp(52));
+        button.setPadding(dp(16), dp(12), dp(16), dp(12));
+        button.setTextColor(primary ? 0xffffffff : 0xff6750a4);
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(0x226750a4),
+                roundedBackground(primary ? 0xff6750a4 : 0xfff2edf7,
+                        primary ? 0xff6750a4 : 0xfff2edf7), null));
+        return button;
+    }
+
+    private EditText labeledField(LinearLayout card, String label, String hint) {
+        TextView name = text(label, 13);
+        name.setTextColor(0xff625b71);
+        name.setPadding(0, dp(16), 0, dp(6));
+        card.addView(name);
         EditText view = new EditText(this);
+        view.setId(View.generateViewId());
+        name.setLabelFor(view.getId());
         view.setHint(hint);
+        view.setTextSize(16);
+        view.setTextColor(0xff1d1b20);
+        view.setHintTextColor(0xff79747e);
         view.setSingleLine(true);
+        view.setMinimumHeight(dp(48));
         view.setPadding(dp(12), dp(12), dp(12), dp(12));
+        StateListDrawable background = new StateListDrawable();
+        background.addState(new int[]{android.R.attr.state_focused},
+                roundedBackground(0xfffdfbff, 0xff6750a4));
+        background.addState(new int[]{}, roundedBackground(0xfffdfbff, 0xffcac4d0));
+        view.setBackground(background);
+        card.addView(view, fullWidth());
         return view;
     }
 
@@ -361,6 +889,7 @@ public final class MainActivity extends Activity {
         TextView view = new TextView(this);
         view.setText(value);
         view.setTextSize(size);
+        view.setTextColor(0xff1d1b20);
         return view;
     }
 

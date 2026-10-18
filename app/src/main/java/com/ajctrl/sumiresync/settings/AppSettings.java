@@ -18,6 +18,11 @@ public final class AppSettings {
     public String webDavUrl() { return prefs.getString("webdav_url", ""); }
     public String webDavUser() { return prefs.getString("webdav_user", ""); }
     public boolean foregroundInferenceEnabled() { return prefs.getBoolean("foreground_inference", false); }
+    public void setForegroundInferenceEnabled(boolean enabled) {
+        synchronized (UPLOAD_SETTINGS_LOCK) {
+            prefs.edit().putBoolean("foreground_inference", enabled).apply();
+        }
+    }
     public long flagDurationMillis() {
         return prefs.getLong("flag_duration_millis", DEFAULT_FLAG_DURATION_MILLIS);
     }

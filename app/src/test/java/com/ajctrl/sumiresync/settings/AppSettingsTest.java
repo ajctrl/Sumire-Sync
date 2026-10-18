@@ -55,6 +55,20 @@ public final class AppSettingsTest {
         assertTrue(next.generation > running.generation);
     }
 
+    @Test public void inferenceTogglePreservesConnectionCredentialsAndUploadGeneration() throws Exception {
+        settings.save("https://a.example.com", "alice", false, "password");
+        long generation = settings.uploadGeneration();
+        settings.setForegroundInferenceEnabled(true);
+        AppSettings reloaded = new AppSettings(RuntimeEnvironment.getApplication());
+        assertTrue(reloaded.foregroundInferenceEnabled());
+        assertEquals("https://a.example.com", reloaded.uploadSettings().url);
+        assertEquals("alice", reloaded.uploadSettings().user);
+        assertEquals("password", reloaded.uploadSettings().password);
+        assertEquals(generation, reloaded.uploadGeneration());
+        reloaded.setForegroundInferenceEnabled(false);
+        assertFalse(settings.foregroundInferenceEnabled());
+    }
+
     // Android Keystore is unavailable on the host JVM; only replace encryption here.
     @Implements(value = SecretStore.class, isInAndroidSdk = false)
     public static class TestSecrets {

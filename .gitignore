@@ -2,6 +2,9 @@
 .gradle/
 build/
 
+# Local screenshots, design mockups, and downloaded build artifacts
+/artifacts/
+
 # Local configuration file (sdk path, etc)
 local.properties
 
