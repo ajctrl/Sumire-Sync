@@ -27,14 +27,16 @@ APK は `app/build/outputs/apk/debug/app-debug.apk` に出力されます。Sumi
 python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 ```
 
-## タグによるリリース
+## リリースの起動と署名
 
-タグを push すると、Android build が単体テスト、署名付き APK のビルド・署名検証を実行し、APK 付き GitHub Release を公開します。署名には Sumire 本体と同じ証明書を使い、次のリポジトリ Secrets を設定してください。
+手動公開は Actions の「Dependabot dependency release」→「Run workflow」で main を指定します。順番が来てからチェックアウトした main が対象です。先行する公開があればその実行が終わるまで待ち、順番が来ると同じ Actions 実行で採番・検証・署名・公開まで行います。署名には Sumire 本体と同じ証明書を使い、次のリポジトリ Secrets を設定してください。
 
 - `ANDROID_KEYSTORE_BASE64`
 - `ANDROID_KEYSTORE_PASSWORD`
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEY_PASSWORD`
+
+タグ作成と Release 公開には組み込みの `GITHUB_TOKEN` を使います。実行中に main のワークフローが更新されて GitHub が公開を拒否した場合も、次の定期実行が最新の main から未公開の変更を拾います。
 
 ## 依存関係の自動更新・公開
 
@@ -48,24 +50,19 @@ push・手動実行・自動リリース後の依存送信は、共通のconcurr
 
 ### 自動取り込みの対象
 
-Dependabotが作成したPRのうち、`app/build.gradle.kts`の`implementation`・`testImplementation`の安定版パッチ番号だけを上げる変更を自動処理します。
-加えて、OkHttpおよびテスト依存のJUnit・Robolectric・Bouncy Castleは、安定版のマイナー・メジャー更新も自動処理します。特定のメジャー番号には限定せず、テスト・ビルド成功を条件に自動取り込みします。Bouncy Castleの`1.86 → 1.87`やRobolectricの`4.14.1 → 4.17`のように、パッチ番号を省略したバージョンにも対応します。
-それ以外の依存のマイナー・メジャー更新、プレリリース、Gradleプラグイン・GitHub Actionsの変更、手動コミットを含むPRは手動確認が必要です。SDKやビルド設定の変更が必要でチェックに失敗する更新は、自動取り込みされません。
+Gradle の通常更新はビルドツール、Bouncy Castle、テスト依存、その他のライブラリに分けます。Dependabot のコミットだけで構成され、ルートまたは app の `build.gradle.kts` で依存・プラグインの安定版番号だけを上げる PR が自動マージの対象です。
 
-### 自動リリースの流れ
+Gradle Wrapper は単独 PR で更新し、公式 SHA-256 と CI の結果を確認して手動マージします。通常の依存 PR は push と pull_request のどちらの CI が先に終わっても、同じ SHA で両方の必須チェックが成功すると自動マージします。
 
-- `main`の必須チェック`Build APK`に成功し、最新のmainに対してマージ可能なPRを自動マージします。
-- `versionCode`を1、`versionName`のパッチ番号を1増やしたコミットを準備し、そのコミットで単体テストと署名付きAPKのビルド・署名検証を行います。
-- 成功したコミットのチェック結果を記録してmainを更新し、`vX.Y.Z`タグとAPK付きGitHub Releaseを公開します。
-- ビルド中にmainが進んだ場合は公開を止め、次回に新しいmainで再検証します。途中で公開が失敗した場合も、公開待ちのバージョンを再利用します。
+### 公開するタイミング
 
-### 実行タイミングと再試行
+10分ごとの定期実行と手動実行は同じキューで直列に動きます。順番が来た時点の main に、ダウンロードできる安定版 APK に含まれていない変更があれば公開します。通常の機能修正も対象です。
 
-処理はAndroid buildの成功後に起動し、毎時17分・47分（UTC）にも再確認します。
-再試行はActionsの`Dependabot dependency release` → `Run workflow`から実行できます。
+### 採番・検証・公開
 
-### 署名情報の扱い
+1. 移行前の `versionCode` の最大値は 8 です。以後は固定値 8 にこのワークフローの `GITHUB_RUN_NUMBER` を加えて採番します。空振りや失敗した実行の番号は欠番になります。このワークフローを作り直して実行番号がリセットされる場合は、移行時にオフセットを見直してください。
+2. main、既存の安定版タグおよび Release の最大の版からパッチ番号を一つ上げ、版番号だけを変更したコミットにタグを付けます。2台のランナーでこのコミットをビルドし、未署名 APK が一致したら署名します。署名前の SHA-256、署名後の manifest と埋め込み Git SHA を照合します。
+3. 署名済み APK とチェックサムをドラフトに添付し、GitHub 側のダイジェストを照合してから公開します。失敗しても確保済みのタグは残します。次の定期実行または「Run workflow」が、その時点の未公開変更を新しい番号でまとめて公開します。「Re-run jobs」で古い実行から公開することはできません。
+4. 公開済みの APK が対象の変更を含んでいれば、その実行は終了します。タグだけがある場合や APK を取り下げた場合は、次の実行で再び公開対象になります。
 
-署名には既存の`ANDROID_KEYSTORE_*`・`ANDROID_KEY_*`リポジトリSecretsを使います。
-単体テストとdebugビルドには署名Secretsを渡しません。タグのリリースビルドと、自動リリースのテスト成功後の署名ビルドにだけ渡し、展開したkeystoreは処理終了時に削除します。
-タグpushによる通常の手動リリースも引き続き利用できます。
+CI の失敗・タイムアウト、Wrapper の手動レビュー待ち、公開失敗は、対象 PR で理由ごとに1回だけ @ajctrl に通知します。タグの push から直接公開する経路はありません。

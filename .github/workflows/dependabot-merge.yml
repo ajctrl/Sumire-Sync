@@ -1,0 +1,47 @@
+name: Dependabot PR checks
+
+on:
+  workflow_run:
+    workflows: [Android build]
+    types: [completed]
+  # Retry checks while GitHub computes mergeability.
+  schedule:
+    - cron: '17,47 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-pr-checks
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  merge:
+    if: >-
+      github.repository == 'ajctrl/Sumire-Sync' &&
+      (github.event_name != 'workflow_run' ||
+       (contains(fromJSON('["pull_request", "push"]'), github.event.workflow_run.event) &&
+        contains(fromJSON('["success", "failure", "timed_out"]'), github.event.workflow_run.conclusion)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    steps:
+      # workflow_run is privileged: always use trusted automation from main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Notify on Dependabot PR checks
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/dependabot_release.py notice
+      - name: Merge an eligible tested update
+        if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/dependabot_release.py merge

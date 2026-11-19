@@ -1,22 +1,26 @@
 """Merge eligible, tested Dependabot updates and publish tested release commits.
 
-Only the planning job uses PR data. Signing jobs build an immutable commit based
-on main, never a PR checkout. GitHub's required checks still gate the PR merge.
+Build the version-only release commit and publish the verified, signed APK.
 """
 
-import base64
+import hashlib
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 import re
 import subprocess
 import sys
+from zipfile import ZipFile
 
 
 REPO = os.environ.get("GITHUB_REPOSITORY", "ajctrl/Sumire-Sync")
 APP = "app/build.gradle.kts"
 BOT = "dependabot[bot]"
-RELEASE_MESSAGE = "chore: release v{} (Dependabot)"
+REQUIRED_CHECKS = {"Build APK", "Verify APK / Compare APKs", "Resolve all dependency configurations"}
+STABLE = re.compile(r"v\d+\.\d+\.\d+")
+RELEASE_MESSAGE = "chore: release v{}"
 
 
 def gh(*args, input=None):
@@ -34,59 +38,134 @@ def api(path, method="GET", data=None):
     return json.loads(result) if result.strip() else None
 
 
-def pages(path):
+def pages(path, key=None):
     separator = "&" if "?" in path else "?"
     for page in range(1, 101):
         items = api(f"{path}{separator}per_page=100&page={page}")
+        if key:
+            items = items[key]
         yield from items
         if len(items) < 100:
             return
     raise RuntimeError("Pagination limit reached; review manually")
 
 
+def version_parts(version):
+    parts = list(map(int, version.removesuffix(".Final").split(".")))
+    while parts and parts[-1] == 0:
+        parts.pop()
+    return parts
+
+
 def eligible_update_line(before, after):
-    # Literal stable versions only. No prereleases, ranges, downgrades, plugin code,
-    # app version edits, or arbitrary Gradle expressions are eligible.
-    pattern = (r'(?P<prefix>\s*(?P<scope>implementation|testImplementation)\("'
-               r'(?P<artifact>[^"\s]+:[^"\s]+):)'
-               r'(?P<version>\d+\.\d+(?:\.\d+)?)(?P<suffix>"\)(?:\s*\{)?\s*)')
-    old, new = re.fullmatch(pattern, before), re.fullmatch(pattern, after)
-    if not old or not new or old['prefix'] != new['prefix'] or old['suffix'] != new['suffix']:
-        return False
-    previous = tuple(map(int, old['version'].split('.')))
-    following = tuple(map(int, new['version'].split('.')))
-    # Releases may omit a zero patch: Robolectric 4.14.1 -> 4.17 (= 4.17.0).
-    previous += (0,) * (3 - len(previous))
-    following += (0,) * (3 - len(following))
-    if following <= previous:
-        return False
-    if previous[:2] == following[:2]:
-        return True  # Existing patch-update policy for all declared dependencies.
-    if old['scope'] == 'implementation' and old['artifact'] == 'com.squareup.okhttp3:okhttp':
-        return True  # Stable major, minor and patch updates are eligible.
-    # Bouncy Castle uses two-part releases, e.g. 1.86 -> 1.87.
-    return old['scope'] == 'testImplementation' and old['artifact'] in {
-        'junit:junit', 'org.robolectric:robolectric', 'org.bouncycastle:bcprov-jdk18on',
-    }
+    # Only the literal version may change, including in tool classpath constraints.
+    patterns = (
+        r'\s*(?:implementation|testImplementation|classpath)\("[\w.$-]+:[\w.$-]+:',
+        r'\s*add\(securityConstraints\.name, "[\w.$-]+:[\w.$-]+:',
+        r'\s*id\("[\w.-]+"\) version "',
+    )
+    for prefix in patterns:
+        pattern = rf'({prefix})(\d+(?:\.\d+)+(?:\.Final)?)("\)(?: \{{)?|"(?: apply false)?)\s*'
+        old, new = re.fullmatch(pattern, before), re.fullmatch(pattern, after)
+        if old and new and old[1] == new[1] and old[3] == new[3]:
+            return version_parts(new[2]) > version_parts(old[2])
+    return False
 
 
-def eligible(pr):
-    if (pr["user"]["login"] != BOT or pr["base"]["ref"] != "main"
-            or (pr["head"].get("repo") or {}).get("full_name") != REPO):
+WRAPPER_FILES = {"gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar",
+                 "gradle/wrapper/gradle-wrapper.properties"}
+
+
+def dependency_file(file):
+    if file["filename"] not in {APP, "build.gradle.kts"} or file["status"] != "modified":
         return False
-    files = list(pages(f"pulls/{pr['number']}/files"))
-    if len(files) != 1 or files[0]["filename"] != APP or files[0]["status"] != "modified":
-        return False
-    file = files[0]
     patch = file.get("patch", "")
     removed = [line[1:] for line in patch.splitlines() if line.startswith("-")]
     added = [line[1:] for line in patch.splitlines() if line.startswith("+")]
-    if (not removed or len(removed) != len(added)
-            or len(removed) != file["deletions"] or len(added) != file["additions"]
-            or not all(eligible_update_line(a, b) for a, b in zip(removed, added))):
-        return False
+    return (bool(removed) and len(removed) == len(added) == file["deletions"] == file["additions"]
+            and all(eligible_update_line(a, b) for a, b in zip(removed, added)))
+
+
+def update_kind(pr):
+    if (pr["user"]["login"] != BOT or pr["base"]["ref"] != "main" or pr.get("draft")
+            or (pr["head"].get("repo") or {}).get("full_name") != REPO):
+        return None
+    files = list(pages(f"pulls/{pr['number']}/files"))
+    if files and all(f["filename"] in WRAPPER_FILES and f["status"] == "modified" for f in files):
+        return "wrapper"  # Always reviewed and merged by a human.
+    if not files or not all(dependency_file(f) for f in files):
+        return None
     commits = list(pages(f"pulls/{pr['number']}/commits"))
-    return bool(commits) and all((c.get("author") or {}).get("login") == BOT for c in commits)
+    if commits and all((c.get("author") or {}).get("login") == BOT for c in commits):
+        return "dependency"
+    return None
+
+
+def eligible(pr):
+    kind = update_kind(pr)
+    return kind == "dependency" or (kind == "wrapper" and bool(pr.get("merged_at")))
+
+
+def notify(number, reason, message):
+    path = f"issues/{int(number)}/comments"
+    marker = f"<!-- sumire-sync:{reason} -->"
+    if any(c["user"]["login"] == "github-actions[bot]" and marker in c["body"] for c in pages(path)):
+        return
+    api(path, "POST", {"body": f"@ajctrl {message}\n\n{marker}"})
+
+
+def latest_android_run(head, event):
+    query = urlencode({"event": event, "branch": head["ref"], "head_sha": head["sha"], "per_page": 1})
+    runs = api(f"actions/workflows/android.yml/runs?{query}")["workflow_runs"]
+    if runs and (runs[0].get("head_repository") or {}).get("full_name") == REPO:
+        return runs[0]
+    return None
+
+
+def android_checks_passed(pr):
+    for event in ("push", "pull_request"):
+        run = latest_android_run(pr["head"], event)
+        if not run or run["status"] != "completed" or run["conclusion"] != "success":
+            return False
+        jobs = pages(f"actions/runs/{run['id']}/jobs?filter=all", key="jobs")
+        latest = {}
+        for job in jobs:
+            name = job["name"]
+            if name not in latest or job["run_attempt"] > latest[name]["run_attempt"]:
+                latest[name] = job
+        passed = {name for name, job in latest.items() if job["conclusion"] == "success"}
+        if not REQUIRED_CHECKS <= passed:
+            return False
+    return True
+
+
+def notice():
+    run = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())["workflow_run"]
+    result = run["conclusion"]
+    if (run["head_repository"]["full_name"] != REPO or run["event"] not in {"pull_request", "push"}
+            or result not in {"success", "failure", "timed_out"}):
+        return
+    for pr in pages(f"commits/{run['head_sha']}/pulls"):
+        if (pr["state"] != "open" or pr["head"]["sha"] != run["head_sha"]
+                or (run["event"] == "push" and pr["head"]["ref"] != run["head_branch"])
+                or pr["user"]["login"] != BOT or pr["base"]["ref"] != "main"
+                or (pr["head"].get("repo") or {}).get("full_name") != REPO):
+            continue
+        link = f"[実行ログ]({run['html_url']})"
+        if result != "success":
+            latest = latest_android_run(pr["head"], run["event"])
+            if (not latest or latest["id"] != run["id"] or latest["run_attempt"] != run["run_attempt"]
+                    or latest["status"] != "completed" or latest["conclusion"] != result):
+                continue
+            notify(pr["number"], "ci", f"CI が失敗またはタイムアウトしました。{link}")
+        elif update_kind(pr) == "wrapper" and android_checks_passed(pr):
+            notify(pr["number"], "wrapper", f"Wrapper の CI が成功しました。手動レビューとマージをお願いします。{link}")
+
+
+def release_notice():
+    url = f"https://github.com/{REPO}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+    for number in os.environ["RELEASE_PRS"].split():
+        notify(number, "release", f"マージ後の APK リリース処理が失敗しました。未公開の変更は次の定期実行で再度公開します。main に修正をマージした後は Actions の「Dependabot dependency release」を手動実行できます。[実行ログ]({url})")
 
 
 def version_info(source):
@@ -97,15 +176,10 @@ def version_info(source):
     return int(codes[0]), names[0]
 
 
-def bump(source):
-    code, name = version_info(source)
-    major, minor, patch = map(int, name.split("."))
-    name = f"{major}.{minor}.{patch + 1}"
-    if code >= 2100000000:
-        raise RuntimeError("Android versionCode limit reached")
-    source = re.sub(r"(?m)^(\s*versionCode = )\d+\s*$", rf"\g<1>{code + 1}", source)
+def set_android_version(source, code, name):
+    source = re.sub(r"(?m)^(\s*versionCode = )\d+\s*$", rf"\g<1>{code}", source)
     source = re.sub(r'(?m)^(\s*versionName = ")[^"]+("\s*)$', rf"\g<1>{name}\2", source)
-    return source, name
+    return source
 
 
 def output(**values):
@@ -115,98 +189,172 @@ def output(**values):
     print(json.dumps(values))
 
 
-def plan():
-    # Finish an outstanding release before merging another PR.
-    latest = api("releases/latest")
-    main = api("commits/main")
-    comparison = api(f"compare/{latest['tag_name']}...{main['sha']}")
-    if comparison["status"] not in ("ahead", "identical"):
-        raise RuntimeError("Latest release is not an ancestor of main")
-    if comparison["total_commits"] > len(comparison["commits"]):
-        raise RuntimeError("Too many unreleased commits; review manually")
-    unreleased = {c["sha"] for c in comparison["commits"]}
-    pending = []
-    for pr in pages("pulls?state=closed&base=main&sort=updated&direction=desc"):
-        if pr.get("merged_at") and pr.get("merge_commit_sha") in unreleased and eligible(pr):
-            pending.append(pr["number"])
+def uploaded_assets(release):
+    return {asset["name"]: asset["size"] for asset in release["assets"]
+            if asset["state"] == "uploaded" and asset["size"] > 0}
 
-    if not pending:
-        for summary in pages("pulls?state=open&base=main&sort=created&direction=asc"):
-            if summary["user"]["login"] != BOT:
-                continue
-            pr = api(f"pulls/{summary['number']}")
-            if not eligible(pr) or pr.get("mergeable_state") != "clean":
-                continue
-            checks = api(f"commits/{pr['head']['sha']}/check-runs?per_page=100")
-            builds = [c for c in checks["check_runs"] if c["name"] == "Build APK"
-                      and c["app"]["slug"] == "github-actions"]
-            if not builds or any(c["conclusion"] != "success" for c in builds):
-                continue
-            result = api(f"pulls/{pr['number']}/merge", "PUT", {
-                "sha": pr["head"]["sha"], "merge_method": "squash"})
-            if not result.get("merged"):
-                raise RuntimeError(f"PR #{pr['number']} could not be merged")
-            pending = [pr["number"]]
-            main = api("commits/main")
-            if main["sha"] != result["sha"]:
-                raise RuntimeError("main advanced during merge; retry on the next run")
-            break
 
-    if not pending:
-        print("No eligible tested Dependabot update is ready for release.")
+def published_tags(releases):
+    """Stable releases that users can actually download, newest version first."""
+    tags = []
+    for release in releases:
+        tag = release["tag_name"]
+        if release["draft"] or release["prerelease"] or not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+            continue
+        if f"Sumire-Sync-{tag}.apk" in uploaded_assets(release):
+            tags.append(tag)
+    return sorted(tags, key=lambda tag: version_parts(tag[1:]), reverse=True)
+
+
+def unpublished_commits(revisions, source="HEAD"):
+    # Exclude commits already included in downloadable stable releases.
+    revisions = [source, *("^" + ref for ref in revisions)]
+    result = subprocess.check_output(["git", "rev-list", "--stdin"],
+                                     input="\n".join(revisions) + "\n", text=True)
+    return set(result.splitlines())
+
+
+def pending_updates(history):
+    return [pr for pr in pages("pulls?state=closed&base=main&sort=updated&direction=desc")
+            if pr.get("merged_at") and pr["merge_commit_sha"] in history and eligible(pr)]
+
+
+def merge_update():
+    for summary in pages("pulls?state=open&base=main&sort=created&direction=asc"):
+        if summary["user"]["login"] != BOT:
+            continue
+        pr = api(f"pulls/{summary['number']}")
+        if not eligible(pr) or pr.get("mergeable_state") != "clean":
+            continue
+        if not android_checks_passed(pr):
+            continue
+        result = api(f"pulls/{pr['number']}/merge", "PUT", {
+            "sha": pr["head"]["sha"], "merge_method": "squash"})
+        if not result.get("merged"):
+            raise RuntimeError(f"PR #{pr['number']} could not be merged")
+        print(f"Merged #{pr['number']}; it will be included in the next release batch.")
         return
 
-    base = main["sha"]
-    file = api(f"contents/{APP}?ref={base}")
-    source = base64.b64decode(file["content"]).decode()
-    _, current_version = version_info(source)
-    # If publication failed after advancing main, reuse that version/commit.
-    if main["commit"]["message"] == RELEASE_MESSAGE.format(current_version):
-        sha, version = base, current_version
-    else:
-        source, version = bump(source)
-        tree = api("git/trees", "POST", {
-            "base_tree": main["commit"]["tree"]["sha"],
-            "tree": [{"path": APP, "mode": "100644", "type": "blob", "content": source}]})
-        commit = api("git/commits", "POST", {
-            "message": RELEASE_MESSAGE.format(version),
-            "tree": tree["sha"], "parents": [base]})
-        sha = commit["sha"]
-    output(sha=sha, base=base, version=version)
+
+def git(*args):
+    return subprocess.check_output(["git", *args], text=True).strip()
+
+
+def source_file(ref):
+    return subprocess.check_output(["git", "show", f"{ref}:{APP}"], text=True)
+
+
+# The last release before switching to workflow run numbers used versionCode 8.
+VERSION_CODE_OFFSET = 8
+
+
+def plan():
+    if os.environ["GITHUB_RUN_ATTEMPT"] != "1":
+        return
+    source = git("rev-parse", "HEAD")
+    tags = {tag for tag in git("tag", "--list").splitlines() if STABLE.fullmatch(tag)}
+    releases = list(pages("releases"))
+    # Only use refs from the same fetch as main. A later remote tag cannot
+    # introduce an object that is missing from this checkout.
+    covered = [f"refs/tags/{tag}" for tag in published_tags(releases) if tag in tags]
+    history = unpublished_commits(covered, source)
+    if not history:
+        print("All changes are already in a downloadable release.")
+        return
+
+    code = VERSION_CODE_OFFSET + int(os.environ["GITHUB_RUN_NUMBER"])
+    if code > 2100000000:
+        raise RuntimeError("Android versionCode limit reached")
+    content = source_file(source)
+    main_code, name = version_info(content)
+    if tags:
+        latest = max(tags, key=lambda tag: version_parts(tag[1:]))
+        last_code, _ = version_info(source_file("refs/tags/" + latest))
+        if code <= last_code:
+            print(f"Run code {code} was superseded by {latest} (code {last_code}).")
+            return
+    if code <= main_code:
+        raise RuntimeError("Workflow versionCode must exceed the versionCode on main")
+    reserved = tags | {r["tag_name"] for r in releases if STABLE.fullmatch(r["tag_name"])}
+    latest_name = max(reserved | {"v" + name}, key=lambda tag: version_parts(tag[1:]))[1:]
+    major, minor, patch = map(int, latest_name.split("."))
+    version = f"{major}.{minor}.{patch + 1}"
+    prs = " ".join(str(pr["number"]) for pr in pending_updates(history))
+
+    git("checkout", "--quiet", "--detach", source)
+    Path(APP).write_text(set_android_version(content, code, version))
+    git("-c", "user.name=github-actions[bot]", "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+        "commit", "--quiet", "-m", RELEASE_MESSAGE.format(version), "--", APP)
+    output(commit=git("rev-parse", "HEAD"), version=version, code=code, prs=prs)
+
+
+def verify_signed_apk_version():
+    version = os.environ["RELEASE_VERSION"]
+    apk = Path("artifacts") / f"Sumire-Sync-v{version}.apk"
+    for field, expected in (("version-code", os.environ["RELEASE_CODE"]), ("version-name", version)):
+        actual = subprocess.check_output(["apkanalyzer", "manifest", field, str(apk)], text=True).strip()
+        if actual != expected:
+            raise RuntimeError(f"{apk.name} has {field} {actual!r}; expected {expected}")
+
+    with ZipFile(apk) as archive:
+        vcs = archive.read("META-INF/version-control-info.textproto").decode()
+    revisions = re.findall(r'^\s*revision: "([0-9a-f]{40})"\s*$', vcs, re.M)
+    if revisions != [os.environ["RELEASE_COMMIT"]]:
+        raise RuntimeError("Signed APK revision differs from the planned release commit")
+
+
+def file_digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def verify_assets(release, expected):
+    assets = {a["name"]: a.get("digest") for a in release["assets"] if a["state"] == "uploaded"}
+    if any(assets.get(name) != "sha256:" + digest for name, digest in expected.items()):
+        raise RuntimeError("Uploaded release assets do not match the signed artifact")
+
+
+def upload_asset(release_id, path):
+    url = f"https://uploads.github.com/repos/{REPO}/releases/{int(release_id)}/assets?"
+    headers = {"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+               "Content-Type": "application/octet-stream", "Content-Length": str(path.stat().st_size)}
+    with path.open("rb") as data:
+        request = Request(url + urlencode({"name": path.name}), data=data, headers=headers, method="POST")
+        with urlopen(request, timeout=120) as response:
+            if response.status != 201:
+                raise RuntimeError(f"Failed to upload {path.name}: HTTP {response.status}")
 
 
 def publish():
-    sha, base, version = (os.environ[k] for k in ("RELEASE_SHA", "RELEASE_BASE", "RELEASE_VERSION"))
-    tag = f"v{version}"
-    apk = Path("artifacts") / f"Sumire-Sync-{tag}.apk"
-    if not apk.is_file() or apk.stat().st_size == 0:
-        raise RuntimeError("Signed release APK is missing")
-    if api("commits/main")["sha"] not in (base, sha):
-        raise RuntimeError("main advanced during build; retry to test the new main")
-    existing = [r for r in pages("releases") if r["tag_name"] == tag]
-    if existing and not existing[0]["draft"]:
-        raise RuntimeError(f"{tag} is already published; refusing to replace it")
-    refs = api(f"git/matching-refs/tags/{tag}")
-    matching = [r for r in refs if r["ref"] == f"refs/tags/{tag}"]
-    if matching and matching[0]["object"]["sha"] != sha:
-        raise RuntimeError("Release tag already points to another commit")
-    # The build job tested this exact release commit. Record that result so
-    # the version-only commit satisfies main's required status check too.
-    api(f"statuses/{sha}", "POST", {
-        "state": "success", "context": "Build APK",
-        "description": "Unit tests and signed release APK passed",
-        "target_url": f"https://github.com/{REPO}/actions/runs/{os.environ['GITHUB_RUN_ID']}"})
-    api("git/refs/heads/main", "PATCH", {"sha": sha, "force": False})
+    if os.environ["GITHUB_RUN_ATTEMPT"] != "1":
+        raise RuntimeError("Start a fresh release run")
+    version = os.environ["RELEASE_VERSION"]
+    tag = "v" + version
+    commit = os.environ["RELEASE_COMMIT"]
+    if git("rev-parse", "HEAD") != commit or api(f"commits/tags/{tag}")["sha"] != commit:
+        raise RuntimeError("Release tag differs from the verified checkout")
 
-    if not matching:
-        api("git/refs", "POST", {"ref": f"refs/tags/{tag}", "sha": sha})
-    if not existing:
-        gh("release", "create", tag, "--repo", REPO, "--draft", "--title", tag,
-           "--generate-notes", "--verify-tag")
-    gh("release", "upload", tag, str(apk), "--repo", REPO, "--clobber")
-    gh("release", "edit", tag, "--repo", REPO, "--draft=false", "--latest")
-    print(f"Published https://github.com/{REPO}/releases/tag/{tag}")
+    apk = Path("artifacts") / f"Sumire-Sync-{tag}.apk"
+    checksum = apk.with_suffix(".apk.sha256")
+    digest = file_digest(apk)
+    if not apk.stat().st_size or checksum.read_text().strip() != f"{digest}  {apk.name}":
+        raise RuntimeError("Signed APK or checksum is invalid")
+    notes = " ".join(f"#{int(n)}" for n in os.environ["RELEASE_PRS"].split()) or f"Source: {commit}"
+    draft = api("releases", "POST", {"draft": True, "name": tag, "tag_name": tag,
+                "target_commitish": commit, "body": notes})
+    path = f"releases/{draft['id']}"
+    try:
+        upload_asset(draft["id"], apk)
+        upload_asset(draft["id"], checksum)
+        verify_assets(api(path), {apk.name: digest, checksum.name: file_digest(checksum)})
+        api(path, "PATCH", {"draft": False, "make_latest": "true"})
+    except Exception:
+        # The publish request can succeed even if its response is lost.
+        if api(path)["draft"]:
+            api(path, "DELETE")
+        raise
 
 
 if __name__ == "__main__":
-    {"plan": plan, "publish": publish}[sys.argv[1]]()
+    {"merge": merge_update, "plan": plan, "publish": publish, "notice": notice,
+     "release-notice": release_notice, "verify-apk-version": verify_signed_apk_version}[sys.argv[1]]()

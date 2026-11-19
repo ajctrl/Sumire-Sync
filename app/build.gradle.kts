@@ -66,7 +66,9 @@ android {
 
     buildTypes {
         getByName("release") {
-            signingConfig = signingConfigs.getByName("release")
+            if (providers.gradleProperty("verifyUnsignedRelease").orNull != "true") {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 }
