@@ -114,7 +114,7 @@ dependencies {
                 because("Keep crypto providers in the separate lint/tool classpaths patched too")
             }
         }
-        testImplementation("org.bouncycastle:bcprov-jdk18on:1.86") {
+        testImplementation("org.bouncycastle:bcprov-jdk18on:1.87") {
             because("Use the patched provider for Robolectric's transitive test dependency")
         }
     }
