@@ -5,7 +5,7 @@ buildscript {
         constraints {
             // Patch AGP's build-time dependencies, not just the APK/test classpath.
             classpath("org.bouncycastle:bcprov-jdk18on:1.86")
-            classpath("org.bouncycastle:bcpkix-jdk18on:1.86")
+            classpath("org.bouncycastle:bcpkix-jdk18on:1.87")
             classpath("org.bouncycastle:bcutil-jdk18on:1.86")
             classpath("org.apache.commons:commons-lang3:3.21.0")
             classpath("org.bitbucket.b_c:jose4j:0.9.7")
