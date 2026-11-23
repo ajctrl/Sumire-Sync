@@ -52,7 +52,7 @@ push・手動実行・自動リリース後の依存送信は、共通のconcurr
 
 Gradle の通常更新はビルドツール、Bouncy Castle、テスト依存、その他のライブラリに分けます。Dependabot のコミットだけで構成され、ルートまたは app の `build.gradle.kts` で依存・プラグインの安定版番号だけを上げる PR が自動マージの対象です。
 
-Gradle Wrapper は単独 PR で更新し、公式 SHA-256 と CI の結果を確認して手動マージします。通常の依存 PR は push と pull_request のどちらの CI が先に終わっても、同じ SHA で両方の必須チェックが成功すると自動マージします。
+Gradle Wrapper も、Dependabot のコミットだけで `gradle-wrapper.properties` の公式配布 URL の安定版番号を上げ、対応する SHA-256 を更新した PR は自動マージします。CI で Gradle 公式の SHA-256 と照合し、通常の依存 PR と同じく、同じコミットの push と pull_request の必須チェックが両方成功した時点で取り込みます。起動スクリプト、Wrapper JAR、その他の設定を含む変更は手動レビューの対象です。
 
 ### 公開するタイミング
 
