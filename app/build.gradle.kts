@@ -89,7 +89,7 @@ configurations.configureEach {
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:5.5.1")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.robolectric:robolectric:4.18")
+    testImplementation("org.robolectric:robolectric:4.18.1")
     constraints {
         listOf(
             "netty-buffer", "netty-codec", "netty-codec-http", "netty-codec-http2",
