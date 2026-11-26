@@ -124,7 +124,28 @@ class ReleaseTests(unittest.TestCase):
             with patch.object(release, "pages", return_value=[changed]):
                 self.assertFalse(release.eligible(PR))
 
-    def test_wrapper_release_requires_manual_merge(self):
+    def test_only_bot_distribution_upgrades_can_auto_merge(self):
+        url = r"distributionUrl=https\://services.gradle.org/distributions/gradle-"
+        checksum = "distributionSha256Sum="
+        diff = "\n".join(["@@ -3,2 +3,2 @@", f"-{url}9.9.1-bin.zip", "-" + checksum + "a" * 64,
+                          f"+{url}9.9.2-bin.zip", "+" + checksum + "b" * 64])
+        wrapper = {**FILE, "filename": release.WRAPPER_PROPERTIES, "patch": diff, "deletions": 2, "additions": 2}
+        bot = {"author": {"login": release.BOT}}
+        files = [wrapper]
+        for changes, commits, expected in [
+                (files, [bot], True), (files, [bot, {"author": {"login": "human"}}], False),
+                ([wrapper, {**FILE, "filename": "gradlew"}], [bot], False),
+                ([wrapper, {**FILE, "filename": "gradle/wrapper/gradle-wrapper.jar"}], [bot], False),
+                ([{**wrapper, "additions": 3}], [bot], False),
+                ([{**wrapper, "patch": ""}], [bot], False),
+                ([{**wrapper, "patch": diff.replace("9.9.2", "9.9.0")}], [bot], False),
+                ([{**wrapper, "patch": diff.replace("9.9.2", "9.10-rc-1")}], [bot], False),
+                ([{**wrapper, "patch": diff.replace("services.gradle.org", "example.org")}], [bot], False),
+                ([{**wrapper, "patch": diff.replace(checksum, "networkTimeout=")}], [bot], False)]:
+            with self.subTest(changes=changes, commits=commits), patch.object(release, "pages", side_effect=[changes, commits]):
+                self.assertEqual(release.eligible({**PR, "merged_at": None}), expected)
+
+    def test_other_wrapper_changes_require_manual_merge(self):
         file = {**FILE, "filename": "gradle/wrapper/gradle-wrapper.properties"}
         for merged in (None, "today"):
             with patch.object(release, "pages", side_effect=[[file], [{"author": {"login": release.BOT}}]]):

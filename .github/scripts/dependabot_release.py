@@ -72,8 +72,25 @@ def eligible_update_line(before, after):
     return False
 
 
-WRAPPER_FILES = {"gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar",
-                 "gradle/wrapper/gradle-wrapper.properties"}
+WRAPPER_PROPERTIES = "gradle/wrapper/gradle-wrapper.properties"
+WRAPPER_FILES = {"gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar", WRAPPER_PROPERTIES}
+
+
+def wrapper_distribution_update(file):
+    if file["filename"] != WRAPPER_PROPERTIES or file["deletions"] != 2 or file["additions"] != 2:
+        return False
+    patch = file.get("patch", "").split("\n")
+    url = r"distributionUrl=https\\?://services\.gradle\.org/distributions/gradle-([0-9]+(?:\.[0-9]+)+)-bin\.zip"
+    versions = []
+    for prefix in ("-", "+"):
+        lines = sorted(line[1:] for line in patch if line.startswith(prefix))
+        if len(lines) != 2 or not re.fullmatch(r"distributionSha256Sum=[0-9a-f]{64}", lines[0]):
+            return False
+        match = re.fullmatch(url, lines[1])
+        if not match:
+            return False
+        versions.append(version_parts(match[1]))
+    return versions[1] > versions[0]
 
 
 def dependency_file(file):
@@ -91,13 +108,17 @@ def update_kind(pr):
             or (pr["head"].get("repo") or {}).get("full_name") != REPO):
         return None
     files = list(pages(f"pulls/{pr['number']}/files"))
-    if files and all(f["filename"] in WRAPPER_FILES and f["status"] == "modified" for f in files):
-        return "wrapper"  # Always reviewed and merged by a human.
-    if not files or not all(dependency_file(f) for f in files):
+    wrapper = bool(files) and all(f["filename"] in WRAPPER_FILES and f["status"] == "modified" for f in files)
+    if wrapper:
+        if len(files) != 1 or not wrapper_distribution_update(files[0]):
+            return "wrapper"
+    elif not files or not all(dependency_file(f) for f in files):
         return None
     commits = list(pages(f"pulls/{pr['number']}/commits"))
     if commits and all((c.get("author") or {}).get("login") == BOT for c in commits):
         return "dependency"
+    if wrapper:
+        return "wrapper"
     return None
 
 
